@@ -204,7 +204,7 @@ export const DATA = {
 	projects: [
 		{
 			title: "Slate",
-			href: "https://github.com/Rivetron/slate",
+			href: "https://github.com/rivetron/slate",
 			purpose: "CLI Presentations",
 			featured: true,
 			isTemplate: false,
@@ -214,14 +214,14 @@ export const DATA = {
 			links: [
 				{
 					type: "Source",
-					href: "https://github.com/Rivetron/slate",
+					href: "https://github.com/rivetron/slate",
 					icon: Icons.github(),
 				},
 			],
 		},
 		{
 			title: "Tether",
-			href: "https://github.com/Rivetron/tether",
+			href: "https://github.com/rivetron/tether",
 			purpose: "Short Link Service",
 			featured: true,
 			isTemplate: false,
@@ -231,14 +231,14 @@ export const DATA = {
 			links: [
 				{
 					type: "Source",
-					href: "https://github.com/Rivetron/tether",
+					href: "https://github.com/rivetron/tether",
 					icon: Icons.github(),
 				},
 			],
 		},
 		{
 			title: "Cortex",
-			href: "https://github.com/Rivetron/cortex",
+			href: "https://github.com/rivetron/cortex",
 			purpose: "Subdomain Discovery",
 			featured: true,
 			isTemplate: false,
@@ -248,12 +248,12 @@ export const DATA = {
 			links: [
 				{
 					type: "Source",
-					href: "https://github.com/Rivetron/cortex",
+					href: "https://github.com/rivetron/cortex",
 					icon: Icons.github(),
 				},
 				{
 					type: "Curl",
-					href: "curl -sSf https://raw.githubusercontent.com/Rivetron/cortex/main/scripts/install.sh | bash",
+					href: "curl -sSf https://raw.githubusercontent.com/rivetron/cortex/main/scripts/install.sh | bash",
 					icon: Icons.bash(),
 				},
 			],
