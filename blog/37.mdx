@@ -1,0 +1,571 @@
+---
+title:
+  "Elasticsearch vs Meilisearch: What's Actually Happening Inside a Search Engine (And Why It Isn't
+  a Database) 🔍"
+publishedAt: "2026-07-18"
+description: |
+  I was reading through system design write-ups on how large e-commerce platforms handle
+  inventory — stock counts, reservations, oversell prevention — and kept running into the same
+  side note: the product catalog people actually search and filter through isn't served off the
+  inventory database at all, it's a separate search index. That throwaway line turned into a
+  rabbit hole. Here's what's actually inside Elasticsearch and Meilisearch, why neither of them is
+  "a database with search bolted on," and how to pick between them.
+about: Database
+---
+
+_I was going through a few system design write-ups on how large e-commerce platforms manage
+inventory — how they avoid overselling the last unit of something, how stock reservations work
+during checkout, how counts stay consistent across warehouses. Fairly standard distributed-systems
+territory: locks, reservations, eventual consistency between warehouse counts and what the site
+displays._
+
+_But almost every one of these write-ups had the same throwaway line: the product listing and
+search page — the thing showing you "1,204 wireless headphones, filter by price, in stock, sorted
+by relevance" — isn't querying the inventory database at all. It's backed by a completely separate
+search index, kept in sync with the actual source of truth. I'd skimmed past that sentence in two
+or three articles before it actually stopped me: why does browsing a catalog need a different
+system than tracking whether an item is in stock? Isn't that all just... querying a database?_
+
+_That question is what sent me down the rabbit hole. Not a production incident this time — just
+one sentence in someone else's system design doc that I couldn't let go of. So I went and actually
+looked at what Elasticsearch and Meilisearch are doing under the hood, and why "just query the
+database" stops being a reasonable answer the moment search and relevance enter the picture. This
+post is what I found._
+
+---
+
+## 🧠 Why This Isn't a "Which Index Is Faster" Question
+
+The instinct when you hit a search problem is to reach for a better index on your existing
+database. That instinct is wrong more often than it looks, and it's worth being precise about
+why, because the reason shapes everything else in this post.
+
+A relational database is built around **row storage and exact predicates**. Your primary key
+B-tree (or your Postgres GIN index on a `tsvector` column) answers questions like "give me rows
+where this column equals this value" or "give me rows where this value falls in this range."
+Even full-text extensions like `tsvector`/`tsquery` are, underneath, a bolted-on inverted index —
+Postgres builds a GIN structure mapping lexemes to row locations. It works, but it was never
+designed to be the center of gravity for the system. There's no typo tolerance, no query-time
+relevance tuning pipeline, no distributed aggregation engine sitting behind it.
+
+A search engine inverts the whole storage model on purpose. The **inverted index** is not an
+optimization bolted onto row storage — it _is_ the storage model:
+
+```
+Forward index (what a row store gives you):
+  doc 1 → "the quick brown fox"
+  doc 2 → "the lazy brown dog"
+
+Inverted index (what a search engine builds):
+  "brown" → [doc 1, doc 2]
+  "dog"   → [doc 2]
+  "fox"   → [doc 1]
+  "lazy"  → [doc 2]
+  "quick" → [doc 1]
+```
+
+Once you store data this way, "find every document containing this word" becomes a direct lookup
+instead of a scan, and — critically — you can attach a *score* to each match instead of a boolean
+yes/no. That single design decision is why search engines can do typo tolerance, relevance
+ranking, and faceting cheaply, and why relational engines can only approximate it. Everything
+below — Lucene's segments, Meilisearch's roaring bitmaps, both engines' ranking pipelines — is a
+consequence of taking the inverted index seriously as the primary storage structure rather than a
+bolt-on.
+
+Elasticsearch and Meilisearch both start from that same premise. They diverge almost immediately
+after, and the divergence tells you a lot about who each one is for.
+
+---
+
+## 🐘 Elasticsearch: Lucene, Distributed
+
+Elasticsearch is not, itself, a search algorithm. It's a distributed coordination layer wrapped
+around **Apache Lucene**, which does the actual indexing and searching on each node. Understanding
+Elasticsearch means understanding Lucene first, then understanding what Elasticsearch bolts on top
+to make many Lucene instances behave like one system.
+
+### The Segment Model
+
+A Lucene index — and therefore one Elasticsearch shard — is made of **immutable segments**. This
+is the same core idea as an LSM-tree: you never modify data in place.
+
+```
+Shard = Lucene index = a set of immutable segments
+
+[Segment 1]  [Segment 2]  [Segment 3]  ...
+   ↑              ↑             ↑
+ written at    written at    written at
+  T1            T2            T3
+```
+
+Writes don't touch existing segments. Instead:
+
+1. New documents go into an **in-memory buffer**, and every write is also appended to a
+   **translog** (a write-ahead log) so it survives a crash before it's durable on disk.
+2. On a **refresh** (default: every 1 second), the in-memory buffer is written out as a brand new
+   segment and becomes visible to search. This is what "near real-time" means in Elasticsearch —
+   your document is searchable roughly a second after you index it, not instantly, and not after
+   a full commit.
+3. On a **flush**, segments are fsynced to disk and the translog is cleared, since the data is now
+   durably represented in segment files.
+4. In the background, a **merge policy** continuously combines small segments into larger ones,
+   physically dropping documents that were marked deleted (deletes in Lucene are soft — a bitset
+   flags the doc as deleted, and it's only actually removed from disk during a merge).
+
+This is why Elasticsearch write throughput degrades if you index too aggressively without letting
+merges keep up — you get "too many segments," and every query has to check all of them.
+
+### What's Actually Inside a Segment
+
+Each segment carries several structures, and the choice of which one to consult depends entirely
+on the kind of query:
+
+- **Inverted index (postings lists)** — term → sorted list of doc IDs, plus term frequency and,
+  if you've asked for it, exact positions (needed for phrase queries) and offsets (needed for
+  highlighting). Postings lists are delta-encoded and compressed, since consecutive doc IDs
+  compress extremely well.
+- **Term dictionary** — implemented as an **FST (finite state transducer)**, a structure that
+  shares common prefixes across terms the way a trie does but is far more memory-efficient. A
+  regular trie shares prefixes only; an FST additionally shares *suffixes* and encodes an output
+  value (here, a byte offset into the postings list) directly along the path you walk to spell out
+  the term — so looking up a term and finding where its postings list lives happen in the same
+  traversal, no separate hash lookup needed. Because terms are stored sorted and prefix/suffix
+  compressed, a dictionary of millions of terms often collapses to a few megabytes, and it's this
+  structure — not a hash table — that makes prefix queries (`"lap*"`) and wildcard/regexp queries
+  fast: Elasticsearch walks the FST as an automaton, following only the transitions that match the
+  pattern, instead of testing every term in the dictionary against it.
+- **Doc values** — a **column-oriented** store, one per field, built specifically for sorting,
+  aggregations, and scripting. This matters more than it sounds: the inverted index is optimized
+  for "find documents containing X," but aggregating "average price across matching documents"
+  needs the opposite access pattern — value-per-document, not document-per-value. Doc values exist
+  because Lucene realized early on that trying to serve both patterns from one structure was a
+  losing trade.
+- **BKD trees** — used for numeric, date, and geo fields since Lucene 6. A plain B-tree only
+  really answers one-dimensional questions well ("keys less than X"); a `k-d tree` (k-dimensional
+  tree) generalizes that by splitting the space along alternating dimensions as you go deeper —
+  split on longitude at the root, latitude at the next level, longitude again below that, and so
+  on — so that a range like "price between 100 and 500 AND rating above 4" or "within 5km of this
+  point" prunes huge regions of the space in one comparison instead of checking every dimension
+  independently. The "block" (**B**KD) part is what makes it practical on disk rather than just in
+  memory: instead of one tree node per value, Lucene bulk-loads points into it and groups leaves
+  into disk-page-sized blocks (roughly 512 points each), so a range query walks a shallow tree of
+  block boundaries and then does one sequential read per matching block, rather than a random disk
+  seek per point. That's the same underlying motivation as a B-tree's fan-out over a plain binary
+  search tree — trade tree depth for I/O efficiency — just extended to more than one dimension at
+  once. It's what lets a query like `price BETWEEN 100 AND 500` skip straight to the relevant
+  blocks instead of consulting the inverted index at all, since "greater than" and "less than"
+  aren't questions an inverted index (built for exact-term equality) can answer efficiently on its
+  own.
+- **Stored fields** — the original `_source` JSON, kept row-oriented (compressed) purely so a
+  matching document can be fetched back in full. This is Lucene admitting that sometimes you do
+  just want the row.
+
+Notice the pattern: Lucene keeps a row-oriented copy (stored fields) *and* a column-oriented copy
+(doc values) *and* an inverted index, because no single layout serves lookup, aggregation, and
+retrieval equally well. A relational database mostly commits to one layout and index type per
+table; Lucene commits to three, on purpose, per field.
+
+### Scoring: BM25, Term by Term
+
+When Elasticsearch matches documents, it doesn't just return them — it ranks them, by default
+using **BM25** ("Best Matching 25," the 25th iteration of a scoring function line that came out of
+1970s–90s information retrieval research at City University London — the same lineage that gave us
+TF-IDF). It's worth actually working through the formula rather than waving at it, because every
+term in it is answering a specific, deliberate question:
+
+```
+score(D, Q) = Σ IDF(qi) · (f(qi, D) · (k1 + 1)) / (f(qi, D) + k1 · (1 - b + b · |D| / avgdl))
+```
+
+Read it left to right, per query term `qi`:
+
+**1. `IDF(qi)` — how much should this word count at all?**
+
+```
+IDF(qi) = ln(1 + (N - n(qi) + 0.5) / (n(qi) + 0.5))
+```
+
+`N` is the total number of documents, `n(qi)` is how many of them contain the term. If "the"
+appears in 9,900 of your 10,000 documents, `IDF` collapses toward zero — matching it tells you
+almost nothing. If "titanium" appears in 12 documents, `IDF` is large — matching it is a strong
+signal. This is the same intuition as `tf-idf`, just wrapped in a smoother, probabilistically
+motivated curve instead of a raw `log(N/n)`.
+
+**2. `f(qi, D)` — raw term frequency, then deliberately un-linear.**
+
+`f(qi, D)` is just how many times the term appears in this specific document. The interesting part
+is what happens to it: it's wrapped in `(f · (k1+1)) / (f + k1)`, a saturating curve. Go from 1
+occurrence to 2 and the score jumps meaningfully. Go from 20 occurrences to 21 and it barely moves.
+`k1` (typically `1.2`–`2.0`, Elasticsearch defaults to `1.2`) controls how fast that curve
+saturates — it's the parameter that stops keyword-stuffed documents from dominating just because
+they repeat a term fifty times.
+
+**3. The denominator's `(1 - b + b · |D|/avgdl)` — length normalization.**
+
+`|D|` is this document's length, `avgdl` the average length across the index. If a document is
+twice the average length, this term roughly doubles, which pulls the whole fraction down —
+penalizing the raw term frequency for documents that are long simply because they're long, not
+because they're more relevant. `b` (0 to 1, default `0.75`) tunes how aggressively that penalty
+applies: `b = 0` turns length normalization off entirely, `b = 1` applies it in full.
+
+**A concrete pass:** searching `"wireless headphones"` against a product titled "Wireless
+Bluetooth Headphones" (short, both terms present once) versus a 400-word product description that
+happens to mention "wireless" three times buried in spec text. The short title wins — not because
+Elasticsearch "prefers short documents" as a rule, but because `b` discounts the description's raw
+term-frequency advantage relative to its length, while `k1`'s saturation means those three
+mentions were never worth 3x a single mention in the first place. Both knobs are pushing toward
+the same outcome: reward *concentrated, relevant* matches over merely *frequent* ones.
+
+The final `score(D, Q)` sums this per-term contribution across every query term and adds them up —
+which is also why BM25 is a bag-of-words model: it has no idea "wireless headphones" is a phrase
+unless you explicitly ask for a phrase or proximity query (which then reads the position data
+stored in the postings list, mentioned above).
+
+This is the piece that a `tsvector` `ts_rank` in Postgres only crudely approximates — Postgres's
+default ranking is a much simpler weighted-frequency function without BM25's saturation curve or
+length normalization tuned in from decades of IR research, and (this matters) *the same scoring
+model driving your relevance is also the one your distributed aggregations and highlighting are
+built around*.
+
+### Going Distributed
+
+A single Lucene index only runs on one machine. Elasticsearch's actual job — the part it adds on
+top of Lucene — is making many Lucene indices (**shards**) behave like one searchable, resilient
+whole.
+
+```
+Index "products" (5 primary shards, 1 replica each)
+
+Node A: P0  R1  R3
+Node B: P1  R2  R4
+Node C: P2  R0  ...
+Node D: P3  P4  R0  R1
+```
+
+A few mechanics matter here:
+
+- **Routing.** A document is assigned to a shard via `hash(routing_value) % number_of_primary_shards`.
+  The hash function is **MurmurHash3**, a non-cryptographic hash chosen specifically because it's
+  fast (a handful of multiply-rotate-xor rounds over the input bytes, no cryptographic properties
+  needed) and — the property that actually matters here — it distributes its output bits
+  uniformly, so that even routing values like sequential IDs or timestamps that share long common
+  prefixes still land on effectively random shards instead of clustering onto one. A weak or
+  biased hash would mean some shards silently end up hot while others sit empty, which is a much
+  worse failure mode than slow lookups: it's invisible until a specific shard falls over under
+  load. The `% number_of_primary_shards` step is exactly why that shard count is fixed at index
+  creation — it's a modulus baked into where every document already lives, so changing it would
+  instantly make every existing document's stored shard disagree with where a fresh hash would now
+  send it. (Elasticsearch does offer `split`/`shrink` APIs, but they work by re-routing and
+  physically rewriting documents into a new index with a new shard count under the hood — they're
+  re-index operations under a different name, not a free resize.)
+- **Replication.** Writes go to the primary shard first, then to its replicas, and the client only
+  gets an ack once enough copies confirm (`wait_for_active_shards`). Replicas exist for both
+  durability and read scaling — a query can be served by any copy of a shard.
+- **Cluster coordination.** A master-eligible node owns the authoritative cluster state — which
+  shards live where, index mappings, settings. Since Elasticsearch 7, this uses a proper
+  distributed consensus protocol (replacing the older Zen discovery, which had real split-brain
+  failure modes under network partitions). This is not a decorative detail — it's the difference
+  between "the cluster degrades gracefully during a partition" and "the cluster silently
+  diverges."
+- **Query execution: query-then-fetch.** A search request hits a coordinating node, which
+  broadcasts the query to every relevant shard. Each shard returns its local top-N doc IDs and
+  scores (the *query* phase). The coordinator merges those into a true global top-N, and only
+  *then* does it fetch the full `_source` documents for that final set from the shards that hold
+  them (the *fetch* phase). This two-phase design is precisely why deep pagination (`from: 10000`)
+  is expensive — every shard still has to compute scores for everything ahead of the requested
+  page.
+- **Aggregations** run on top of doc values, which is exactly why they're fast at scale: bucketing
+  8 million documents by category and averaging price per bucket doesn't touch the inverted index
+  or stored fields at all.
+
+The overall shape: Elasticsearch trades operational weight (JVM tuning, heap sizing, cluster
+topology decisions, shard count planning up front) for the ability to scale search and analytics
+horizontally, with a genuinely distributed consensus model underneath it.
+
+---
+
+## 🦀 Meilisearch: Rust, LMDB, and a Different Set of Trade-offs
+
+Meilisearch starts from a different premise entirely: most people running search don't need a
+distributed cluster, they need something that's fast, typo-tolerant, and trivial to operate. It's
+written in Rust and built on **LMDB** (Lightning Memory-Mapped Database) rather than a custom
+segment-merging engine.
+
+### LMDB as the Foundation
+
+LMDB is a memory-mapped **B+tree** key-value store, originally built for OpenLDAP. Its design
+choices explain a lot about how Meilisearch behaves:
+
+- **Copy-on-write, not write-ahead-logging.** LMDB never modifies a page in place. A write walks
+  the B+tree path down to the target leaf, copies every page along that path, updates the copies,
+  and atomically swaps in a new root pointer once the transaction commits. There's no WAL to
+  replay on crash recovery, because the old tree is *still on disk, untouched*, right up until the
+  moment the new root becomes visible. Crash mid-write just means the new root pointer was never
+  written — you land back on the last consistent tree.
+- **Single-writer, multiple-reader (MVCC).** Only one write transaction can be in flight at a
+  time, but readers never block on it and never block each other — each reader sees a consistent
+  snapshot via the root pointer that was current when its transaction started. This is a
+  meaningfully different concurrency model from Lucene's segment merges or Postgres's MVCC with
+  vacuum.
+- **It's just `mmap`.** The whole database is a memory-mapped file. The OS page cache does most of
+  the caching work for free, which is part of why Meilisearch's memory footprint is comparatively
+  small and predictable relative to a JVM heap.
+
+### How Meilisearch Lays Out an Index
+
+Rather than one big inverted index, Meilisearch splits index data across several purpose-built
+LMDB sub-databases:
+
+- `word → roaring bitmap of doc IDs` — the core inverted index, but the postings list is a
+  **roaring bitmap** instead of a raw sorted array.
+- `word-prefix → roaring bitmap of doc IDs` — a separate structure specifically for prefix
+  matching, which is what makes "search as you type" fast: matching `"lap"` against `"laptop"`
+  doesn't require a scan, it's a direct prefix lookup.
+- `word-pair-proximity → roaring bitmap` — precomputed data about how close two words tend to
+  appear to each other, feeding directly into the proximity ranking rule below.
+- `documents` — the actual records, stored in a compact binary key-value format (`obkv`), keyed
+  by an internal numeric doc ID.
+
+**Roaring bitmaps** deserve a specific callout, because they're doing real work here, not just
+being a memory-efficient data structure for its own sake. A plain bitset representing "which of my
+10 million doc IDs match this word" would burn over a megabit regardless of whether 5 documents or
+5 million match — wasteful for a sparse postings list. A plain sorted array of IDs is compact when
+sparse but slow to intersect and wasteful when dense. Roaring bitmaps (designed by Daniel Lemire
+and collaborators) sidestep the choice: they partition the 32-bit ID space into 2^16-sized chunks
+(so each chunk covers 65,536 consecutive IDs) and pick a representation *per chunk*:
+
+```
+Chunk is sparse (few matching IDs)  → array container: sorted list of 16-bit offsets
+Chunk is dense (many matching IDs)  → bitmap container: a 8KB fixed bitset
+Chunk is a contiguous run           → run-length container: (start, length) pairs
+```
+
+A word like "the," matching most documents, ends up almost entirely bitmap containers. A rare word
+like "titanium" ends up almost entirely array containers. The structure picks the cheaper
+representation automatically as documents are added, and — this is the actual payoff — operations
+between two roaring bitmaps run **container-by-container**: intersecting two bitmap containers is
+a fast word-level `AND` over 8KB, intersecting two array containers is a merge of sorted lists, and
+mixed pairs get cheap conversion rules. You never pay for representing 10 million absent IDs just
+to check whether ID `4,213,009` is present.
+
+This maps directly onto how a query executes: "wireless headphones in stock under ₹3000" is
+`bitmap("wireless") ∩ bitmap("headphones") ∩ bitmap("in_stock") ∩ bitmap("price<3000")`, and every
+added query word, filter, or facet is one more intersection between compact, fast-to-AND
+structures — which is exactly why Meilisearch's ranking pipeline (below) can afford to run several
+sequential narrowing passes over the candidate set instead of computing one big score in a single
+pass.
+
+### Typo Tolerance Isn't a Feature Bolted On — It's a DFA
+
+This is the part that most clearly shows Meilisearch's design center of gravity. To see why it
+needs an automaton at all, look at the naive approach first: **Levenshtein distance** (edit
+distance) between two strings is normally computed by dynamic programming — build an `(m+1) ×
+(n+1)` grid where cell `(i, j)` holds the cheapest way to turn the first `i` characters of one
+string into the first `j` of the other, filling it in from insertions, deletions, and
+substitutions:
+
+```
+edit("", "") = 0
+edit(a[1..i], b[1..j]) = min(
+  edit(a[1..i-1], b[1..j]) + 1,       -- delete a character
+  edit(a[1..i], b[1..j-1]) + 1,       -- insert a character
+  edit(a[1..i-1], b[1..j-1]) + cost   -- substitute (cost = 0 if a[i] == b[j], else 1)
+)
+```
+
+That's cheap for one comparison, but Meilisearch would need to run it against *every term in the
+dictionary* to find fuzzy matches — a linear scan over potentially millions of terms per keystroke.
+Instead, it builds a **Levenshtein automaton**: a deterministic finite automaton, constructed once
+from the query word and a maximum edit distance `k`, whose states track "how many edits have I
+spent so far while consuming the input" and which *accepts* any string reachable within `k` edits.
+Because the term dictionary is stored in that FST from earlier — sorted and prefix-shared — the two
+can be walked **in lockstep**: at each shared prefix position, only automaton states that are still
+alive (haven't exceeded `k` edits) get explored further, so entire branches of the term dictionary
+are pruned the moment they diverge too far, without ever materializing a DP grid per candidate. By
+default:
+
+```
+Word length 1–4  → 0 typos allowed
+Word length 5–8  → 1 typo allowed
+Word length 9+   → 2 typos allowed
+```
+
+This is why `"wireles headphones"` finds `"wireless headphones"` in Meilisearch with zero
+configuration, while it does nothing at all against a plain `tsvector` match, and requires you to
+hand-roll trigram similarity in Postgres (`pg_trgm`, which is a genuinely different technique —
+it indexes 3-character substrings and measures similarity by how many trigrams two strings share,
+rather than walking an edit-distance automaton, and it doesn't understand word boundaries the way
+Meilisearch's tokenizer does).
+
+### Ranking Is a Pipeline, Not a Score
+
+This is the biggest conceptual difference from Elasticsearch, and it's worth sitting with. BM25
+produces a single scalar per document. Meilisearch instead runs candidates through an ordered
+**bucket-sort pipeline** of ranking rules, where each rule narrows or reorders the candidate set
+before the next one runs:
+
+```
+1. words       — documents matching more query words rank first
+2. typo        — fewer typos required to match rank first
+3. proximity   — query words appearing closer together rank first
+4. attribute   — matches in higher-priority attributes rank first
+5. sort        — user-defined sort criteria (price, date, ...)
+6. exactness   — exact word matches outrank partial/stemmed matches
+```
+
+Each rule operates on the *bucket* left over from the previous one, using roaring bitmap set
+operations to narrow candidates at every step, rather than computing one weighted formula across
+every signal simultaneously. This is genuinely a different philosophy from BM25: it's
+deterministic and easy to reason about ("why did this rank above that?" has a legible answer: it
+tied on words and typos, but won on proximity), and the rule order itself is configurable per
+index — which is closer to "relevance as a product decision" than "relevance as a statistical
+formula."
+
+### Indexing and Operations
+
+New documents go through an asynchronous **task queue** — you send a batch, get a task ID back
+immediately, and the actual merge into LMDB happens on a background indexer. Internally, this
+looks conceptually similar to an LSM memtable flush: documents are grouped, externally sorted, and
+merged into the existing LMDB structures rather than updated one row at a time.
+
+Operationally, Meilisearch is a single binary with no JVM, no separate coordination layer, and a
+comparatively tiny memory footprint. The trade-off is exactly what you'd expect: it's fundamentally
+a **single-node** design at its core (Meilisearch Cloud adds managed replication for HA on top),
+not a peer-to-peer distributed cluster with its own consensus protocol. There's no shard count to
+plan for up front, because there's no sharding to plan.
+
+---
+
+## ⚖️ The Two Side by Side
+
+| | Elasticsearch | Meilisearch |
+|---|---|---|
+| Core engine | Apache Lucene (JVM) | Custom, Rust |
+| Storage | Immutable segments, merge-based | LMDB (copy-on-write B+tree) |
+| Postings lists | Compressed delta-encoded arrays | Roaring bitmaps |
+| Relevance model | BM25 (single score) | Ordered ranking-rule pipeline |
+| Typo tolerance | Plugin/fuzzy query, opt-in | Levenshtein DFA, on by default |
+| Distribution | Native shards + replicas, consensus protocol | Single-node core; Cloud adds managed HA |
+| Aggregations/analytics | First-class (doc values, bucket/metric aggs) | Basic facet counts only |
+| Write visibility | Near-real-time (refresh interval) | Async task queue |
+| Ops footprint | JVM heap tuning, cluster topology, shard planning | Single binary, minimal config |
+| Natural habitat | Logs, metrics, large-scale analytics + search | Instant, user-facing search boxes |
+
+---
+
+## 🆚 Why Neither of These Is "A Faster Database"
+
+It's worth being explicit about what you give up by moving search out of your primary database
+and into either of these, because it's not free:
+
+- **No real joins.** Both engines expect denormalized documents. If "product with reviews and
+  seller info" needs to be searchable as one unit, you build that flattened document at write
+  time — there's no query-time join to lean on. (Elasticsearch has `nested` and `parent-child`
+  query types, but both come with real performance caveats and are best understood as workarounds,
+  not joins.)
+- **Consistency is different, not absent.** Elasticsearch's refresh interval and Meilisearch's
+  async task queue both mean "written" and "searchable" are not the same instant. That's a
+  deliberate throughput trade, but it means your application has to tolerate — or explicitly wait
+  for — near-real-time rather than immediate consistency, which is a real design conversation, not
+  a bug to route around.
+- **You now own a sync problem.** Your primary data almost certainly still lives in a relational
+  database. Search indexes are a derived, denormalized copy — which means CDC, dual writes, or a
+  reindex job, and a story for what happens when that pipeline lags or breaks. This is the
+  operational cost people underestimate the most; running the search engine is often easier than
+  keeping it honestly in sync with the source of truth.
+- **Schema is a mapping, not a constraint.** Relational schemas reject bad data at write time.
+  Elasticsearch mappings and Meilisearch's field settings mostly describe *how to index* a field
+  (as text? as a filterable/sortable value? tokenized how?) rather than enforcing referential
+  integrity or types the way a `NOT NULL` foreign key does.
+
+None of this is a knock against either engine — it's the actual reason the inverted-index model
+buys you typo tolerance, faceting, and relevance ranking that a relational index structurally
+can't offer. You're trading transactional guarantees and joins for a storage model built around
+"rank these documents by how well they match," which is a different problem than the one B-trees
+were built to solve.
+
+---
+
+## 🎯 When to Actually Use Which
+
+**Reach for plain Postgres (`tsvector` + GIN, or `pg_trgm`) when:** search is a secondary feature,
+your dataset is small-to-medium, and you'd genuinely rather not run a second system and own a sync
+pipeline. This covers more cases than people assume — if your users mostly do exact or prefix
+matches over a few hundred thousand rows, you don't need an inverted-index engine at all.
+
+**Reach for Elasticsearch when:**
+
+- You need search **and** heavy analytics/aggregations over the same data — the ELK/Elastic-stack
+  use case (logs, metrics, observability) is the canonical example, where "full-text search
+  across log lines" and "bucket these by service and compute p99 latency" are the same system.
+- Your dataset is large enough, or your query load high enough, that you need genuine horizontal
+  scale — sharding across many nodes with a real distributed consensus layer underneath.
+- You need fine-grained control over relevance — custom scoring functions, function_score queries,
+  script-based ranking — and you have the appetite to tune it.
+- You already have (or are willing to build) the operational muscle for JVM tuning, heap sizing,
+  and cluster topology planning. This is real, ongoing work, not a one-time setup cost.
+
+**Reach for Meilisearch when:**
+
+- The problem is a **user-facing search box** — e-commerce search, docs search, in-app
+  autocomplete — where typo tolerance and "it just feels fast and correct" matter more than
+  aggregation depth.
+- Your dataset comfortably fits on a single (well-resourced) machine, which covers a much larger
+  range of real applications than people expect.
+- You want strong relevance out of the box, without hand-tuning a BM25 formula or building a
+  function_score pipeline yourself.
+- You want minimal operational surface area: one binary, no JVM, no cluster to reason about, fast
+  to stand up and fast to reason about when something's wrong.
+
+The honest framing: Elasticsearch is what you reach for when search is one facet of a larger
+distributed analytics problem. Meilisearch is what you reach for when search *is* the problem, and
+you'd like to spend your operational budget elsewhere. Neither is "better" in the abstract — they
+were built to sit at genuinely different points on the scale-versus-simplicity curve, and the
+internals above are exactly why they land where they do.
+
+---
+
+## 📚 Key Takeaways
+
+1. **Full-text search isn't a faster index — it's a different storage model.** The inverted index
+   is the primary structure, not a bolt-on, which is what makes ranking and typo tolerance cheap.
+2. **Elasticsearch is Lucene, distributed.** Immutable segments, an FST-based term dictionary,
+   column-oriented doc values for aggregations, BKD trees for range queries, and a real consensus
+   layer for cluster coordination — all in service of horizontal scale.
+3. **Meilisearch is LMDB, made fast with roaring bitmaps.** A copy-on-write B+tree gives it simple,
+   crash-safe storage; roaring bitmaps make set-algebra over postings lists cheap; a Levenshtein
+   DFA gives typo tolerance for free.
+4. **BM25 vs a ranking pipeline is a real philosophical split.** One score-everything formula
+   versus an ordered, explainable bucket-sort — pick based on whether you need to tune relevance
+   mathematically or configure it as a product decision.
+5. **Both cost you joins and instant consistency.** That trade is what buys the inverted index's
+   power — know what you're giving up before you adopt either.
+6. **The sync pipeline is the real cost.** Standing up the engine is easy. Keeping it honestly in
+   sync with your source of truth is where the actual operational effort goes.
+
+---
+
+## ✨ Final Thoughts
+
+That one throwaway line in a system design write-up — "the catalog is served off a search index,
+not the inventory database" — turned out to be doing a lot of quiet work. The inventory side of an
+e-commerce platform is a transactional problem: exact counts, reservations, no overselling, ACID
+guarantees where it actually matters. The catalog side is a ranking problem: "wireles headphones"
+should still find the right product, "in stock, under ₹3000, sorted by relevance" should feel
+instant, and none of that has anything to do with what a row store is good at. They're not the
+same database wearing two hats — they're two different problems that happen to share a product ID.
+
+If that catalog were mine to build, the answer would come down to scale and shape, same as it does
+for anyone: a single well-resourced box and a search bar that needs to feel instant and forgive
+typos is squarely Meilisearch's problem, not a distributed analytics engine's. Fold in "also
+aggregate and search across hundreds of millions of warehouse and order-log events for the ops
+dashboards," and the answer flips toward Elasticsearch without much hesitation.
+
+The mistake to avoid is treating this as "which product is faster." It isn't. Elasticsearch
+and Meilisearch encode two different bets about what search infrastructure should optimize for —
+one bets on distributed scale and analytical depth, the other bets on simplicity and relevance
+out of the box — and both bets trace directly back to the storage engine underneath: segments and
+consensus on one side, a copy-on-write B+tree and roaring bitmaps on the other.
+
+Next time "just add a search index" comes up in a planning meeting, it's worth asking what's
+actually being proposed underneath that sentence. It's rarely just an index.
