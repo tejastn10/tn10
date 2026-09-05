@@ -2,7 +2,7 @@
 title:
   "Elasticsearch vs Meilisearch: What's Actually Happening Inside a Search Engine (And Why It Isn't
   a Database) 🔍"
-publishedAt: "2026-07-18"
+publishedAt: "2026-07-28"
 description: |
   I was reading through system design write-ups on how large e-commerce platforms handle
   inventory — stock counts, reservations, oversell prevention — and kept running into the same
@@ -65,7 +65,7 @@ Inverted index (what a search engine builds):
 ```
 
 Once you store data this way, "find every document containing this word" becomes a direct lookup
-instead of a scan, and — critically — you can attach a *score* to each match instead of a boolean
+instead of a scan, and — critically — you can attach a _score_ to each match instead of a boolean
 yes/no. That single design decision is why search engines can do typo tolerance, relevance
 ranking, and faceting cheaply, and why relational engines can only approximate it. Everything
 below — Lucene's segments, Meilisearch's roaring bitmaps, both engines' ranking pipelines — is a
@@ -126,7 +126,7 @@ on the kind of query:
   compress extremely well.
 - **Term dictionary** — implemented as an **FST (finite state transducer)**, a structure that
   shares common prefixes across terms the way a trie does but is far more memory-efficient. A
-  regular trie shares prefixes only; an FST additionally shares *suffixes* and encodes an output
+  regular trie shares prefixes only; an FST additionally shares _suffixes_ and encodes an output
   value (here, a byte offset into the postings list) directly along the path you walk to spell out
   the term — so looking up a term and finding where its postings list lives happen in the same
   traversal, no separate hash lookup needed. Because terms are stored sorted and prefix/suffix
@@ -160,8 +160,8 @@ on the kind of query:
   matching document can be fetched back in full. This is Lucene admitting that sometimes you do
   just want the row.
 
-Notice the pattern: Lucene keeps a row-oriented copy (stored fields) *and* a column-oriented copy
-(doc values) *and* an inverted index, because no single layout serves lookup, aggregation, and
+Notice the pattern: Lucene keeps a row-oriented copy (stored fields) _and_ a column-oriented copy
+(doc values) _and_ an inverted index, because no single layout serves lookup, aggregation, and
 retrieval equally well. A relational database mostly commits to one layout and index type per
 table; Lucene commits to three, on purpose, per field.
 
@@ -214,7 +214,7 @@ happens to mention "wireless" three times buried in spec text. The short title w
 Elasticsearch "prefers short documents" as a rule, but because `b` discounts the description's raw
 term-frequency advantage relative to its length, while `k1`'s saturation means those three
 mentions were never worth 3x a single mention in the first place. Both knobs are pushing toward
-the same outcome: reward *concentrated, relevant* matches over merely *frequent* ones.
+the same outcome: reward _concentrated, relevant_ matches over merely _frequent_ ones.
 
 The final `score(D, Q)` sums this per-term contribution across every query term and adds them up —
 which is also why BM25 is a bag-of-words model: it has no idea "wireless headphones" is a phrase
@@ -223,9 +223,9 @@ stored in the postings list, mentioned above).
 
 This is the piece that a `tsvector` `ts_rank` in Postgres only crudely approximates — Postgres's
 default ranking is a much simpler weighted-frequency function without BM25's saturation curve or
-length normalization tuned in from decades of IR research, and (this matters) *the same scoring
+length normalization tuned in from decades of IR research, and (this matters) _the same scoring
 model driving your relevance is also the one your distributed aggregations and highlighting are
-built around*.
+built around_.
 
 ### Going Distributed
 
@@ -269,9 +269,9 @@ A few mechanics matter here:
   diverges."
 - **Query execution: query-then-fetch.** A search request hits a coordinating node, which
   broadcasts the query to every relevant shard. Each shard returns its local top-N doc IDs and
-  scores (the *query* phase). The coordinator merges those into a true global top-N, and only
-  *then* does it fetch the full `_source` documents for that final set from the shards that hold
-  them (the *fetch* phase). This two-phase design is precisely why deep pagination (`from: 10000`)
+  scores (the _query_ phase). The coordinator merges those into a true global top-N, and only
+  _then_ does it fetch the full `_source` documents for that final set from the shards that hold
+  them (the _fetch_ phase). This two-phase design is precisely why deep pagination (`from: 10000`)
   is expensive — every shard still has to compute scores for everything ahead of the requested
   page.
 - **Aggregations** run on top of doc values, which is exactly why they're fast at scale: bucketing
@@ -299,7 +299,7 @@ choices explain a lot about how Meilisearch behaves:
 - **Copy-on-write, not write-ahead-logging.** LMDB never modifies a page in place. A write walks
   the B+tree path down to the target leaf, copies every page along that path, updates the copies,
   and atomically swaps in a new root pointer once the transaction commits. There's no WAL to
-  replay on crash recovery, because the old tree is *still on disk, untouched*, right up until the
+  replay on crash recovery, because the old tree is _still on disk, untouched_, right up until the
   moment the new root becomes visible. Crash mid-write just means the new root pointer was never
   written — you land back on the last consistent tree.
 - **Single-writer, multiple-reader (MVCC).** Only one write transaction can be in flight at a
@@ -332,7 +332,7 @@ being a memory-efficient data structure for its own sake. A plain bitset represe
 5 million match — wasteful for a sparse postings list. A plain sorted array of IDs is compact when
 sparse but slow to intersect and wasteful when dense. Roaring bitmaps (designed by Daniel Lemire
 and collaborators) sidestep the choice: they partition the 32-bit ID space into 2^16-sized chunks
-(so each chunk covers 65,536 consecutive IDs) and pick a representation *per chunk*:
+(so each chunk covers 65,536 consecutive IDs) and pick a representation _per chunk_:
 
 ```
 Chunk is sparse (few matching IDs)  → array container: sorted list of 16-bit offsets
@@ -373,11 +373,11 @@ edit(a[1..i], b[1..j]) = min(
 )
 ```
 
-That's cheap for one comparison, but Meilisearch would need to run it against *every term in the
-dictionary* to find fuzzy matches — a linear scan over potentially millions of terms per keystroke.
+That's cheap for one comparison, but Meilisearch would need to run it against _every term in the
+dictionary_ to find fuzzy matches — a linear scan over potentially millions of terms per keystroke.
 Instead, it builds a **Levenshtein automaton**: a deterministic finite automaton, constructed once
 from the query word and a maximum edit distance `k`, whose states track "how many edits have I
-spent so far while consuming the input" and which *accepts* any string reachable within `k` edits.
+spent so far while consuming the input" and which _accepts_ any string reachable within `k` edits.
 Because the term dictionary is stored in that FST from earlier — sorted and prefix-shared — the two
 can be walked **in lockstep**: at each shared prefix position, only automaton states that are still
 alive (haven't exceeded `k` edits) get explored further, so entire branches of the term dictionary
@@ -413,7 +413,7 @@ before the next one runs:
 6. exactness   — exact word matches outrank partial/stemmed matches
 ```
 
-Each rule operates on the *bucket* left over from the previous one, using roaring bitmap set
+Each rule operates on the _bucket_ left over from the previous one, using roaring bitmap set
 operations to narrow candidates at every step, rather than computing one weighted formula across
 every signal simultaneously. This is genuinely a different philosophy from BM25: it's
 deterministic and easy to reason about ("why did this rank above that?" has a legible answer: it
@@ -438,18 +438,18 @@ plan for up front, because there's no sharding to plan.
 
 ## ⚖️ The Two Side by Side
 
-| | Elasticsearch | Meilisearch |
-|---|---|---|
-| Core engine | Apache Lucene (JVM) | Custom, Rust |
-| Storage | Immutable segments, merge-based | LMDB (copy-on-write B+tree) |
-| Postings lists | Compressed delta-encoded arrays | Roaring bitmaps |
-| Relevance model | BM25 (single score) | Ordered ranking-rule pipeline |
-| Typo tolerance | Plugin/fuzzy query, opt-in | Levenshtein DFA, on by default |
-| Distribution | Native shards + replicas, consensus protocol | Single-node core; Cloud adds managed HA |
-| Aggregations/analytics | First-class (doc values, bucket/metric aggs) | Basic facet counts only |
-| Write visibility | Near-real-time (refresh interval) | Async task queue |
-| Ops footprint | JVM heap tuning, cluster topology, shard planning | Single binary, minimal config |
-| Natural habitat | Logs, metrics, large-scale analytics + search | Instant, user-facing search boxes |
+|                        | Elasticsearch                                     | Meilisearch                             |
+| ---------------------- | ------------------------------------------------- | --------------------------------------- |
+| Core engine            | Apache Lucene (JVM)                               | Custom, Rust                            |
+| Storage                | Immutable segments, merge-based                   | LMDB (copy-on-write B+tree)             |
+| Postings lists         | Compressed delta-encoded arrays                   | Roaring bitmaps                         |
+| Relevance model        | BM25 (single score)                               | Ordered ranking-rule pipeline           |
+| Typo tolerance         | Plugin/fuzzy query, opt-in                        | Levenshtein DFA, on by default          |
+| Distribution           | Native shards + replicas, consensus protocol      | Single-node core; Cloud adds managed HA |
+| Aggregations/analytics | First-class (doc values, bucket/metric aggs)      | Basic facet counts only                 |
+| Write visibility       | Near-real-time (refresh interval)                 | Async task queue                        |
+| Ops footprint          | JVM heap tuning, cluster topology, shard planning | Single binary, minimal config           |
+| Natural habitat        | Logs, metrics, large-scale analytics + search     | Instant, user-facing search boxes       |
 
 ---
 
@@ -474,7 +474,7 @@ and into either of these, because it's not free:
   operational cost people underestimate the most; running the search engine is often easier than
   keeping it honestly in sync with the source of truth.
 - **Schema is a mapping, not a constraint.** Relational schemas reject bad data at write time.
-  Elasticsearch mappings and Meilisearch's field settings mostly describe *how to index* a field
+  Elasticsearch mappings and Meilisearch's field settings mostly describe _how to index_ a field
   (as text? as a filterable/sortable value? tokenized how?) rather than enforcing referential
   integrity or types the way a `NOT NULL` foreign key does.
 
@@ -518,7 +518,7 @@ matches over a few hundred thousand rows, you don't need an inverted-index engin
   to stand up and fast to reason about when something's wrong.
 
 The honest framing: Elasticsearch is what you reach for when search is one facet of a larger
-distributed analytics problem. Meilisearch is what you reach for when search *is* the problem, and
+distributed analytics problem. Meilisearch is what you reach for when search _is_ the problem, and
 you'd like to spend your operational budget elsewhere. Neither is "better" in the abstract — they
 were built to sit at genuinely different points on the scale-versus-simplicity curve, and the
 internals above are exactly why they land where they do.
