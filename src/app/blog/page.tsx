@@ -1,15 +1,20 @@
+import Link from "next/link";
 import type { JSX } from "react";
 import { BentoCard, type BentoCardProps, BentoGrid } from "@/components/animated/BentoGrid";
 import { BlurFade } from "@/components/animated/BlurFade";
 import { BoxReveal } from "@/components/animated/BoxReveal";
 
-import { getLogo } from "@/components/icons/Icons";
+import { getLogo, Icons } from "@/components/icons/Icons";
+import { Button } from "@/components/ui/Button";
 import { BLUR_FADE_DELAY, BOX_REVEAL_DURATION } from "@/constants/ui";
 
 import { POST_SLICE_NUMBER } from "@/constants/values";
+import { NoteCard } from "@/containers/NoteCard";
 import { getBlogPosts } from "@/data/blog";
 import { formatDate } from "@/utils/date";
 import { RemainingSection } from "./remaining-section";
+
+const NOTES_PREVIEW_COUNT = 2;
 
 export const metadata = {
 	title: "Blog",
@@ -17,8 +22,19 @@ export const metadata = {
 		"Welcome to my blog! Here, you will find my thoughts on software development, life, and anything else that comes to mind.",
 };
 
+const isNoteOrPaper = (slug: string): boolean =>
+	slug.startsWith("notes/") || slug.startsWith("papers/");
+
 const BlogPage = async (): Promise<JSX.Element> => {
-	const posts = await getBlogPosts();
+	const allPosts = await getBlogPosts();
+	const posts = allPosts.filter((post) => !isNoteOrPaper(post.slug));
+	const notesAndPapers = allPosts
+		.filter((post) => isNoteOrPaper(post.slug))
+		.sort(
+			(a, b) =>
+				new Date(b.metadata.publishedAt).getTime() - new Date(a.metadata.publishedAt).getTime()
+		);
+
 	const recentPosts: BentoCardProps[] = posts
 		.sort(
 			(a, b) =>
@@ -63,6 +79,40 @@ const BlogPage = async (): Promise<JSX.Element> => {
 					))}
 				</BentoGrid>
 			</BlurFade>
+
+			{notesAndPapers.length > 0 && (
+				<BlurFade delay={BLUR_FADE_DELAY * 6} className="border-t border-border pt-8 mt-8 block">
+					<div className="flex items-end justify-between mb-8 gap-4">
+						<div>
+							<span className="section-label">[ Notes & Papers ]</span>
+							<h2 className="font-bold text-3xl tracking-tighter">Book Notes & Research Papers</h2>
+						</div>
+						<Button variant="outline" size="sm" asChild className="shrink-0 group/cta">
+							<Link href="/blog/notes-and-papers">
+								View All
+								<span className="transition-transform duration-200 group-hover/cta:translate-x-1 inline-block">
+									{Icons.chevron()}
+								</span>
+							</Link>
+						</Button>
+					</div>
+
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						{notesAndPapers.slice(0, NOTES_PREVIEW_COUNT).map((post, index) => (
+							<BlurFade key={post.slug} delay={BLUR_FADE_DELAY * 7 + index * 0.05}>
+								<NoteCard
+									slug={post.slug}
+									title={post.metadata.title}
+									description={post.metadata.description}
+									type={post.slug.startsWith("papers/") ? "Paper" : "Note"}
+									author={post.metadata.author}
+									readingStatus={post.metadata.readingStatus}
+								/>
+							</BlurFade>
+						))}
+					</div>
+				</BlurFade>
+			)}
 
 			<RemainingSection remaining={remainingPosts} />
 		</section>
