@@ -13,6 +13,7 @@ import { BLUR_FADE_DELAY } from "@/constants/ui";
 import { PROJECT_SLICE_NUMBER } from "@/constants/values";
 import { CourseCard } from "@/containers/CourseCard";
 import { GitHubContributions } from "@/containers/GithubContributions";
+import { WorkbenchShowcase } from "@/containers/WorkbenchShowcase";
 import { DATA } from "@/data/resume";
 
 const SectionLabel: FC<{ label: string }> = ({ label }) => (
@@ -125,10 +126,27 @@ const Home: FC = () => {
 				</div>
 			</section>
 
+			{/* ── Workbench ─────────────────────────────────────────── */}
+			<section className="border-t border-border pt-8">
+				<div className="flex min-h-0 flex-col gap-y-4">
+					<BlurFade delay={BLUR_FADE_DELAY * 9}>
+						<SectionLabel label="AI Tooling" />
+						<h2 className="text-3xl font-bold tracking-tighter sm:text-4xl">My agent workbench</h2>
+						<p className="text-muted-foreground md:text-base max-w-lg mt-1">
+							Agents are doing more of my day-to-day work, so I keep the conventions they follow in
+							one place.
+						</p>
+					</BlurFade>
+					<BlurFade delay={BLUR_FADE_DELAY * 9.5}>
+						<WorkbenchShowcase />
+					</BlurFade>
+				</div>
+			</section>
+
 			{/* ── Projects ──────────────────────────────────────────── */}
 			<section className="border-t border-border pt-8">
 				<div className="space-y-10 w-full">
-					<BlurFade delay={BLUR_FADE_DELAY * 9}>
+					<BlurFade delay={BLUR_FADE_DELAY * 10}>
 						<div className="flex flex-col space-y-2">
 							<SectionLabel label="Projects" />
 							<h2 className="text-3xl font-bold tracking-tighter sm:text-4xl">Latest work</h2>
@@ -137,7 +155,7 @@ const Home: FC = () => {
 							</p>
 						</div>
 					</BlurFade>
-					<BlurFade delay={BLUR_FADE_DELAY * 10}>
+					<BlurFade delay={BLUR_FADE_DELAY * 10.5}>
 						<BentoGrid className="auto-rows-[14rem]">
 							{featuredProjects.map((card) => (
 								<BentoCard key={card.name} {...card} />
