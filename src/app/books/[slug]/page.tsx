@@ -31,7 +31,16 @@ const Book = async ({ params }: BookProps): Promise<JSX.Element> => {
 	}
 
 	const { metadata, source } = book;
-	const { title, author, category, readingStatus, publishedDate, description } = metadata;
+	const { title, author, category, readingStatus, publishedDate, finishedOn, description } =
+		metadata;
+
+	const formattedFinishedDate = finishedOn
+		? new Date(finishedOn).toLocaleDateString("en-US", {
+				year: "numeric",
+				month: "short",
+				day: "numeric",
+			})
+		: null;
 
 	return (
 		<section className="relative pb-16">
@@ -65,6 +74,14 @@ const Book = async ({ params }: BookProps): Promise<JSX.Element> => {
 				</div>
 				<hr className="border-border mb-6" />
 			</BlurFade>
+
+			{formattedFinishedDate && (
+				<BlurFade delay={BLUR_FADE_DELAY * 3.25}>
+					<p className="inline-flex items-center gap-1 text-[11px] font-mono text-muted-foreground/50 mb-6">
+						<Icons.check className="w-2.5 h-2.5" /> Finished {formattedFinishedDate}
+					</p>
+				</BlurFade>
+			)}
 
 			{description && (
 				<BlurFade delay={BLUR_FADE_DELAY * 3.5}>
