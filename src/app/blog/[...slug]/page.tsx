@@ -15,20 +15,20 @@ import { calculateReadingTime } from "@/utils/blog";
 import { formatDate } from "@/utils/date";
 
 type BlogProps = {
-	params: Promise<{ slug: string }>;
+	params: Promise<{ slug: string[] }>;
 };
 
 export const generateStaticParams = async (): Promise<
 	{
-		slug: string;
+		slug: string[];
 	}[]
 > => {
 	const posts = await getBlogPosts();
-	return posts.map((post) => ({ slug: post.slug }));
+	return posts.map((post) => ({ slug: post.slug.split("/") }));
 };
 
 export const generateMetadata = async ({ params }: BlogProps): Promise<Metadata | undefined> => {
-	const slug = (await params).slug;
+	const slug = (await params).slug.join("/");
 	const post = await getPost(slug);
 
 	if (!post) {
@@ -63,7 +63,7 @@ export const generateMetadata = async ({ params }: BlogProps): Promise<Metadata 
 };
 
 const Blog = async ({ params }: BlogProps): Promise<JSX.Element> => {
-	const slug = (await params).slug;
+	const slug = (await params).slug.join("/");
 	const post = await getPost(slug);
 
 	if (!post) {
