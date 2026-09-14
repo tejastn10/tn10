@@ -85,6 +85,16 @@
 			text-shadow: 0 0 6px rgba(255, 255, 255, 0.6);
 		}
 	}
+	@keyframes glowIcon {
+		0%, 100% {
+			opacity: 0.7;
+			filter: drop-shadow(0 0 2px rgba(255, 255, 255, 0.3));
+		}
+		50% {
+			opacity: 1;
+			filter: drop-shadow(0 0 6px rgba(255, 255, 255, 0.6));
+		}
+	}
 }
 
 @utility container {
@@ -446,5 +456,9 @@ article strong {
 
 .animate-glow-more {
 	animation: glowMore 1.5s infinite ease-in-out;
+}
+
+.animate-glow-icon {
+	animation: glowIcon 1.5s infinite ease-in-out;
 }
 
