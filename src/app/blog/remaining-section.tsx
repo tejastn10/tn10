@@ -95,6 +95,7 @@ const RemainingSection: FC<RemainingSectionProps> = ({ remaining }) => {
 											description={description}
 											publishedAt={publishedAt}
 											source={post.source}
+											readingStatus={metadata.readingStatus}
 										/>
 									</BlurFade>
 								</div>
