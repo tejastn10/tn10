@@ -357,7 +357,7 @@ export const DATA = {
 			title: "Hollow",
 			href: "https://github.com/tejastn10/hollow",
 			purpose: "Network Packet Analysis",
-			featured: true,
+			featured: false,
 			isTemplate: false,
 			description:
 				"A modern, Electron-based network packet analyzer with a sleek UI, built using TypeScript and React. Designed as a Wireshark alternative for real-time packet inspection and analysis.",
@@ -406,7 +406,7 @@ export const DATA = {
 			title: "AWS-Lambda-Radar",
 			href: "https://github.com/tejastn10/aws-lambda-radar",
 			purpose: "Serverless Monitoring",
-			featured: false,
+			featured: true,
 			isTemplate: false,
 			description:
 				"Streamlined middleware for enhanced Lambda logging and error handling with automatic context capture for better traceability.",
