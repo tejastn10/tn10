@@ -12,6 +12,9 @@ import { unified } from "unified";
 type PostMetadata = {
 	title: string;
 	date: string;
+	readingStatus?: "reading" | "completed" | "to-read";
+	series?: string;
+	part?: number;
 	[key: string]: any;
 };
 
@@ -86,10 +89,11 @@ const getPost = async (slug: string): Promise<Post | null> => {
 };
 
 const getAllPosts: AllPosts = async (dir): Promise<Post[]> => {
-	const mdxFiles = getMDXFiles(dir);
+	const mdxFiles = getMDXFiles(dir, true);
 	const posts = await Promise.all(
 		mdxFiles.map(async (file) => {
-			const slug = path.basename(file, path.extname(file));
+			const relativePath = path.relative(dir, file);
+			const slug = relativePath.slice(0, -path.extname(relativePath).length);
 			const post = await getPost(slug);
 			return post;
 		})
