@@ -3,11 +3,13 @@ import { FaAws } from "react-icons/fa6";
 import { GoContainer } from "react-icons/go";
 import { PiTreeStructure } from "react-icons/pi";
 import {
+	RiArticleLine,
 	RiBriefcase4Line,
 	RiDatabase2Line,
 	RiMapPin3Line,
 	RiMoreLine,
 	RiRotateLockLine,
+	RiStickyNoteLine,
 	RiTimer2Line,
 	RiTwitterXLine,
 } from "react-icons/ri";
@@ -123,6 +125,8 @@ const Icons = {
 	check: (props?: IconProps) => <RxCheck {...props} />,
 	template: (props?: IconProps) => <SiFig {...props} />,
 	reader: (props?: IconProps) => <RxReader {...props} />,
+	note: (props?: IconProps) => <RiStickyNoteLine {...props} />,
+	paper: (props?: IconProps) => <RiArticleLine {...props} />,
 	calendar: (props?: IconProps) => <RxCalendar {...props} />,
 	duration: (props?: IconProps) => <RiTimer2Line {...props} />,
 	chevron: (props?: IconProps) => <RxChevronRight {...props} />,
@@ -256,6 +260,8 @@ const Icons = {
 const logos: Record<TECH, (props?: IconProps) => JSX.Element> = {
 	// * General
 	General: Icons.code,
+	Notes: Icons.note,
+	Paper: Icons.paper,
 
 	// * Frontend
 	JavaScript: Icons.javascript,

@@ -1,5 +1,7 @@
 enum TECH {
 	General = "General",
+	Notes = "Notes",
+	Paper = "Paper",
 
 	// * Frontend
 	JavaScript = "JavaScript",
