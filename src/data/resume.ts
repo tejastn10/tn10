@@ -254,6 +254,28 @@ export const DATA = {
 			],
 		},
 		{
+			title: "GitGrove",
+			href: "https://github.com/tejastn10/git-grove",
+			purpose: "Interactive Git Explainer",
+			featured: false,
+			isTemplate: false,
+			description:
+				"An interactive Git explainer that teaches Git from your first commit to its object model through animated, step-through diagrams — with a live badge tracking the current stable Git release.",
+			technologies: ["Next.js", "TypeScript", "React", "Tailwind CSS", "Framer Motion", "MDX"],
+			links: [
+				{
+					type: "Source",
+					href: "https://github.com/tejastn10/git-grove",
+					icon: Icons.github(),
+				},
+				{
+					type: "Website",
+					href: "https://git-grove.vercel.app",
+					icon: Icons.link(),
+				},
+			],
+		},
+		{
 			title: "Dash",
 			href: "https://github.com/tejastn10/dash",
 			purpose: "Network Speedtest tool",
