@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { FC } from "react";
 import { Icons } from "@/components/icons/Icons";
+import { Badge } from "@/components/ui/Badge";
 import { Card, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/Card";
 import { calculateReadingTime } from "@/utils/blog";
 import { formatDate } from "@/utils/date";
@@ -11,9 +12,23 @@ type BlogCardProps = {
 	source: string;
 	description: string;
 	publishedAt: string;
+	readingStatus?: "reading" | "completed" | "to-read";
 };
 
-const BlogCard: FC<BlogCardProps> = ({ slug, title, source, description, publishedAt }) => {
+const statusLabel: Record<"reading" | "completed" | "to-read", string> = {
+	reading: "Reading",
+	completed: "Completed",
+	"to-read": "To Read",
+};
+
+const BlogCard: FC<BlogCardProps> = ({
+	slug,
+	title,
+	source,
+	description,
+	publishedAt,
+	readingStatus,
+}) => {
 	const formattedDate = formatDate(publishedAt, true);
 	const readingTime = calculateReadingTime(source);
 
@@ -21,10 +36,15 @@ const BlogCard: FC<BlogCardProps> = ({ slug, title, source, description, publish
 		<Card className="flex flex-col p-4 h-full transition-colors duration-200 hover:bg-accent/20 group">
 			<Link href={`/blog/${slug}`}>
 				<CardHeader>
-					<div className="space-y-1 flex items-center pb-2">
+					<div className="space-y-1 flex items-center justify-between pb-2">
 						<CardTitle className="mt-1 text-base font-semibold tracking-tight group-hover:text-foreground transition-colors">
 							{title}
 						</CardTitle>
+						{readingStatus && (
+							<Badge variant="outline" noHover className="shrink-0 font-mono text-[10px]">
+								{statusLabel[readingStatus]}
+							</Badge>
+						)}
 					</div>
 				</CardHeader>
 
