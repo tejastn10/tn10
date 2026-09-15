@@ -751,6 +751,28 @@ export const DATA = {
 		},
 	],
 
+	workbench: {
+		title: "Workbench",
+		tagline:
+			"A personal collection of agent skills, instructions, and MCP configuration for coding agents — reused across Claude Code, VS Code agents, and Codex so every agent pulls from the same conventions.",
+		href: "https://github.com/tejastn10/workbench",
+		site: "https://tejastn10.github.io/workbench/",
+		highlights: [
+			"13 skill categories — workflows, planning, design, PR review, quality, git, data, queues, observability, deployment, incident, security, meta",
+			"Distributed 3 ways: a portable `npx skills add` install for any agent, a managed Claude Code plugin with slash commands + MCP, or clone-and-symlink",
+			"PR review skills distilled from ~120 real review comments, per stack — NestJS/TypeScript, Go, Python, React, DevOps",
+			"Ships its own validator, lefthook + commitlint enforcement, and a docs site generated from the repo at build time",
+		],
+		technologies: ["Claude Code", "MCP", "Agent Skills", "Shell"],
+		links: [
+			{
+				type: "Source",
+				href: "https://github.com/tejastn10/workbench",
+				icon: Icons.github(),
+			},
+		],
+	},
+
 	education: [
 		{
 			school: "University of Mumbai",
