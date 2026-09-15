@@ -2,23 +2,38 @@
 const TILE_HALF_WIDTH = 8;
 const TILE_QUARTER_HEIGHT = 4;
 
-// Cube wall heights per contribution level (0–4)
-const WALL_HEIGHTS = [0, 4, 8, 12, 16] as const;
+// Number of non-zero contribution levels (1-10); level 0 is "no contributions"
+const LEVEL_COUNT = 10;
 
-// [top face, right wall, left wall] per level
+// Cube wall heights per contribution level (0-10), same overall max height as the old 0-4 scale
+const WALL_HEIGHTS = [0, 1.6, 3.2, 4.8, 6.4, 8, 9.6, 11.2, 12.8, 14.4, 16] as const;
+
+// [top face, right wall, left wall] per level (0-10)
 const DARK_PALETTE: [string, string, string][] = [
 	["#1e1e1e", "#181818", "#111111"],
 	["#3a3a3a", "#2e2e2e", "#222222"],
-	["#5e5e5e", "#4a4a4a", "#363636"],
-	["#8a8a8a", "#6d6d6d", "#505050"],
+	["#494949", "#3a3a3a", "#2a2a2a"],
+	["#585858", "#454545", "#333333"],
+	["#676767", "#515151", "#3b3b3b"],
+	["#767676", "#5c5c5c", "#444444"],
+	["#848484", "#686868", "#4c4c4c"],
+	["#939393", "#737373", "#555555"],
+	["#a2a2a2", "#7f7f7f", "#5d5d5d"],
+	["#b1b1b1", "#8a8a8a", "#666666"],
 	["#c0c0c0", "#969696", "#6e6e6e"],
 ];
 
 const LIGHT_PALETTE: [string, string, string][] = [
 	["#e8e8e8", "#d2d2d2", "#bcbcbc"],
 	["#c0c0c0", "#a8a8a8", "#929292"],
-	["#8a8a8a", "#797979", "#686868"],
-	["#5e5e5e", "#515151", "#454545"],
+	["#afafaf", "#999999", "#858585"],
+	["#9f9f9f", "#8a8a8a", "#787878"],
+	["#8e8e8e", "#7c7c7c", "#6b6b6b"],
+	["#7d7d7d", "#6d6d6d", "#5e5e5e"],
+	["#6d6d6d", "#5e5e5e", "#505050"],
+	["#5c5c5c", "#4f4f4f", "#434343"],
+	["#4b4b4b", "#414141", "#363636"],
+	["#3b3b3b", "#323232", "#292929"],
 	["#2a2a2a", "#232323", "#1c1c1c"],
 ];
 
@@ -57,6 +72,7 @@ export {
 	GRID_PADDING,
 	GRID_ROWS,
 	LABEL_FONT_FAMILY,
+	LEVEL_COUNT,
 	LIGHT_PALETTE,
 	LIGHT_STROKE,
 	STROKE_WIDTH,

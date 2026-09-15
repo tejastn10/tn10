@@ -11,6 +11,7 @@ import {
 	GRID_PADDING,
 	GRID_ROWS,
 	LABEL_FONT_FAMILY,
+	LEVEL_COUNT,
 	LIGHT_PALETTE,
 	LIGHT_STROKE,
 	STROKE_WIDTH,
@@ -32,7 +33,7 @@ import {
 } from "@/constants/github";
 import type { Contribution, ContributionData } from "@/data/github";
 import { getCurrentYear } from "@/utils/date";
-import { fetchContributions, groupIntoWeeks } from "@/utils/github";
+import { applyRelativeLevels, fetchContributions, groupIntoWeeks } from "@/utils/github";
 
 type TooltipState = {
 	contribution: Contribution;
@@ -51,7 +52,7 @@ const GitHubContributions: FC = () => {
 	useEffect(() => {
 		setMounted(true);
 		fetchContributions("tejastn10", year)
-			.then(setData)
+			.then((raw) => setData(applyRelativeLevels(raw)))
 			.catch(() => {});
 	}, [year]);
 
@@ -65,7 +66,7 @@ const GitHubContributions: FC = () => {
 	const TW = TILE_HALF_WIDTH;
 	const TH = TILE_QUARTER_HEIGHT;
 	const originX = GRID_ROWS * TW + GRID_PADDING;
-	const originY = GRID_PADDING + WALL_HEIGHTS[4] + TH;
+	const originY = GRID_PADDING + WALL_HEIGHTS[LEVEL_COUNT] + TH;
 	const svgW = (cols + GRID_ROWS) * TW + GRID_PADDING * 2;
 	const svgH = originY + (cols + GRID_ROWS - 1) * TH + GRID_PADDING;
 
@@ -130,7 +131,7 @@ const GitHubContributions: FC = () => {
 							y={SUBLABEL_Y}
 							fontSize={SUBLABEL_FONT_SIZE}
 							fontWeight={SUBLABEL_FONT_WEIGHT}
-							fill={palette[4][0]}
+							fill={palette[LEVEL_COUNT][0]}
 							opacity={SUBLABEL_OPACITY}
 							letterSpacing={SUBLABEL_LETTER_SPACING}
 						>
@@ -198,7 +199,7 @@ const GitHubContributions: FC = () => {
 			<div className="flex items-center gap-2">
 				<span className="font-mono text-xs text-muted-foreground">Less</span>
 				<div className="flex items-center gap-0.5">
-					{([0, 1, 2, 3, 4] as const).map((level) => (
+					{Array.from({ length: LEVEL_COUNT + 1 }, (_, level) => level).map((level) => (
 						<span
 							key={level}
 							style={{ backgroundColor: palette[level][0] }}
