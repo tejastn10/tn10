@@ -684,8 +684,8 @@ export const DATA = {
 			],
 		},
 		{
-			title: "Nimbus",
-			href: "https://github.com/tejastn10/nimbus",
+			title: "tn10",
+			href: "https://github.com/tejastn10/tn10",
 			purpose: "Portfolio",
 			featured: false,
 			isTemplate: false,
@@ -695,12 +695,12 @@ export const DATA = {
 			links: [
 				{
 					type: "Source",
-					href: "https://github.com/tejastn10/nimbus",
+					href: "https://github.com/tejastn10/tn10",
 					icon: Icons.github(),
 				},
 				{
 					type: "Website",
-					href: "https://nimbus-ten.vercel.app",
+					href: "https://tn10-ten.vercel.app",
 					icon: Icons.link(),
 				},
 			],
