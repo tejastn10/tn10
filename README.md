@@ -2,7 +2,7 @@
   <img src="logo.svg" alt="Logo">
 </p>
 
-# Nimbus ☁️
+# tn10 ☁️
 
 ![Node.js Version](https://img.shields.io/badge/Node.js-22%2B-339933?logo=nodedotjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5%2B-007ACC?logo=typescript&logoColor=white)
@@ -12,7 +12,7 @@
 [![Vercel Deployment](https://img.shields.io/badge/Deployed%20on-Vercel-000000?logo=vercel&logoColor=white)](https://vercel.com)
 ![License](https://img.shields.io/badge/License-MIT-yellow?logo=open-source-initiative&logoColor=white)
 
-**Nimbus** is a sleek and interactive portfolio website built with [Next.js](https://nextjs.org). It showcases projects, skills, and experience with a refined black-and-white aesthetic — featuring sharp corners, animated dot grids, monospace typography, and motion-rich interactions.
+**tn10** is a sleek and interactive portfolio website built with [Next.js](https://nextjs.org). It showcases projects, skills, and experience with a refined black-and-white aesthetic — featuring sharp corners, animated dot grids, monospace typography, and motion-rich interactions.
 
 ---
 
@@ -44,8 +44,9 @@ Ensure you have the following installed:
 1. Clone the repository:  
 
    ```bash
-   git clone https://github.com/your-username/nimbus.git
-   cd nimbus
+   git clone https://github.com/tejastn10/tn10.git
+   cd tn10
+   ```
 
 2. Install dependencies:
 
@@ -59,13 +60,13 @@ Ensure you have the following installed:
    npm run dev
    ```
 
-4. Open your browser at `http://localhost:3000` to see Nimbus in action.
+4. Open your browser at `http://localhost:3000` to see tn10 in action.
 
 ---
 
 ### Deployment 📦
 
-Nimbus is designed to be deployed effortlessly on Vercel.
+tn10 is designed to be deployed effortlessly on Vercel.
 
 For more deployment options, check out the Next.js [Deployment Documentation](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme).
 
@@ -74,7 +75,7 @@ For more deployment options, check out the Next.js [Deployment Documentation](ht
 ### Project Structure 📂
 
 ```bash
-nimbus/
+tn10/
 ├── blog/               # Directory for blogs
 ├── books/              # Directory for books
 ├── public/             # Static assets like images, fonts, and favicon
@@ -107,5 +108,5 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE.md) fi
 
 ## Acknowledgments 🙌
 
-- Named after the mythological **Nimbus**, a radiant cloud often associated with divine presence.
+- Named **tn10** — my initials, T N, which happen to rhyme with "ten." That's it, that's the story.
 - Built with ❤️ and Next.js.
