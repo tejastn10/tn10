@@ -1,0 +1,402 @@
+---
+title: "The Migration That Shipped Everywhere and Ran Nowhere: SRV to ECS Service Connect 🕸️"
+publishedAt: "2026-09-17"
+description: |
+  We moved service discovery from Cloud Map SRV lookups to ECS Service Connect. The code
+  shipped, staging worked, production was quietly falling back to SRV on every single call.
+  Here's how Service Connect actually works, why a security group stalled the rollout, and
+  why "no errors" didn't mean "it works."
+about: AWS
+---
+
+_The migration looked done. The `service-invoker` resolver — the shared bit of code every one
+of our services uses to call every other service — had been changed to prefer ECS Service
+Connect and fall back to the old SRV path if anything went wrong. It was deployed. Staging
+looked perfect: logs full of `Resolved via Service Connect`, latency a touch lower, the flaky
+DNS timeouts gone. We flipped it on in production._
+
+_Then I went looking at the production logs to confirm the win, and found the opposite of
+what I expected. Not errors — the site was completely healthy. But the logs were wall to
+wall:_
+
+```
+[ServiceResolver] Service Connect unavailable for auth-service.production, trying SRV
+[ServiceResolver] Service Connect unavailable for subscription-service.production, trying SRV
+[ServiceResolver] Service Connect HTTP probe error for auth-service: ECONNRESET
+```
+
+_In a 24-hour window: `trying SRV` fired hundreds of thousands of times. `Resolved via
+Service Connect` fired exactly zero times. Production was still 100% SRV. The whole migration
+was, functionally, inert — and nothing had told us, because the fallback did its job
+silently._
+
+_The next few days of debugging taught me that Service Connect isn't a code change you deploy.
+It's an infrastructure and network change that happens to have a small code component. Here's
+the whole story._
+
+---
+
+## 🧭 How Discovery Worked Before: SRV and Cloud Map
+
+Every service registered itself into an **AWS Cloud Map** private DNS namespace, one per
+environment (`*.staging`, `*.production`). To call a service, you resolved its **SRV record**
+and picked one of the instances it returned:
+
+```
+caller ──DNS SRV lookup──▶ Cloud Map (auth-service.production)
+       ◀── 8 SRV records: <task-guid>.auth-service.production:3030 ──
+caller picks one at random ──HTTP──▶ http://<task-guid>.auth-service.production:3030
+```
+
+In code, that's the `resolveSRVUrl` path — a SRV lookup, a random pick, three retries with
+backoff:
+
+```go
+func resolveSRVUrl(ctx context.Context, url string) (string, error) {
+	return helper.RetryTaskWithExponentialBackoffWithTimeArg(func() (string, error) {
+		_, addresses, err := (&net.Resolver{}).LookupSRV(ctx, "", "", url)
+		if err != nil {
+			return "", fmt.Errorf("resolveSrvWithRetry: %w", err)
+		}
+		address := lo.Sample(addresses)          // random instance = naive client-side LB
+		if address == nil {
+			return "", fmt.Errorf("resolveSrvWithRetry: got nil address")
+		}
+		return fmt.Sprintf("http://%s:%d", address.Target, address.Port), nil
+	}, 3, 0, time.Millisecond)
+}
+```
+
+It works. But it has a few structural problems that had been quietly costing us:
+
+- **DNS sits on the hot path.** Every single call is a DNS query. Under production load the
+  VPC resolver intermittently returned `querySrv ETIMEOUT`, and when all three retries timed
+  out, the call failed. Staging never saw this because staging has a fraction of the DNS load.
+- **The load balancing is naive.** `lo.Sample` picks a random instance with zero health
+  awareness. A container that crashed two seconds ago but hasn't been deregistered yet is
+  still in the pool, and it will get picked.
+- **No mesh features.** No connection pooling, no transport-level retries, no outlier
+  detection, no per-call telemetry.
+- **Stale records.** Deregistration lag means SRV can hand you an instance that's already
+  gone.
+
+---
+
+## 🕸️ What ECS Service Connect Actually Is
+
+Service Connect turns the ECS services in a namespace into a lightweight service mesh. ECS
+injects a **managed Envoy proxy sidecar** into every task of a Service-Connect-enabled
+service. That sidecar does three things:
+
+1. **Writes `/etc/hosts` entries** inside the task, mapping each service's **client alias**
+   (`event-service`, `user-service`, …) to a loopback address in the `127.255.0.0/16` range
+   that the local Envoy listens on.
+2. **Intercepts outbound calls** to those aliases and proxies them to a **healthy** upstream
+   task's Envoy **ingress listener** — doing load balancing, retries, connection pooling, and
+   outlier detection (ejecting endpoints that start failing).
+3. **Emits telemetry** — request counts, latencies, errors — for every hop, for free.
+
+```
+app calls http://event-service/...   (no port, no DNS)
+        │
+        ▼ /etc/hosts: event-service → 127.255.0.7   (written by the SC agent)
+   local Envoy sidecar  ──mesh (ephemeral port)──▶  event-service task's Envoy ingress
+        │                                                    │
+        └── health-aware LB, retries, pooling                ▼
+                                                       event-service app :3018
+```
+
+The mental model that matters: **with Service Connect, the app never does DNS and never knows
+the port.** It calls a plain alias and the local Envoy handles the rest.
+
+---
+
+## ⚖️ Service Connect vs SRV, Side by Side
+
+| Dimension                      | SRV / Cloud Map                           | ECS Service Connect                                   |
+| ------------------------------ | ----------------------------------------- | ----------------------------------------------------- |
+| Resolution                     | DNS SRV query per call                    | Local `/etc/hosts` → local Envoy (no DNS on hot path) |
+| Load balancing                 | Random instance (`lo.Sample`)             | Envoy health-aware LB + outlier ejection              |
+| Health awareness               | None — any registered instance            | Only healthy upstreams get traffic                    |
+| Retries                        | App-level, 3x on lookup failure           | Transport-level in Envoy, per request                 |
+| Port knowledge                 | Caller must use the SRV-returned port     | Caller uses a portless alias                          |
+| Failure mode                   | DNS `ETIMEOUT` / `ENOTFOUND` → call fails | Envoy fast-fails / retries; bad endpoints ejected     |
+| Telemetry                      | None built in                             | Per-call metrics and traces from the mesh             |
+| Blast radius of a bad instance | Picked until deregistered                 | Ejected by outlier detection quickly                  |
+
+The reliability argument for Service Connect comes down to one thing above all: **the flaky
+network DNS hop is gone from the request path.** The single biggest source of our production
+errors was intermittent SRV `ETIMEOUT`, and Service Connect resolves aliases locally. Add
+health-aware routing, transport-level retries, and consistent latency with no cold-cache
+spikes, and it's a clear win.
+
+The caveat we learned the hard way: **all of that only holds once the mesh can actually carry
+traffic.**
+
+---
+
+## 🛟 The Strategy: Dual-Path With Graceful Fallback
+
+We did not flip discovery over in one step. The resolver was changed to **prefer Service
+Connect and fall back to SRV** whenever the alias isn't reachable:
+
+```go
+if r.srvConfig != nil && r.srvConfig.UseSrv {
+	if scURL := resolveServiceConnectURL(r.srvConfig.SrvBaseURL); scURL != "" {
+		baseURL = scURL                         // Service Connect fast-path
+	} else {
+		baseURL, err = resolveSRVUrl(ctx, r.srvConfig.SrvBaseURL) // fall back to SRV
+		if err != nil {
+			return "", fmt.Errorf("makeRequest: %w", err)
+		}
+	}
+}
+```
+
+Reachability is a cheap, cached probe — a DNS lookup of the plain alias plus a `HEAD /`,
+cached per service for 60 seconds:
+
+```go
+func probeServiceConnect(serviceName string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), serviceConnectProbeTimeout) // 500ms
+	defer cancel()
+
+	if _, err := net.DefaultResolver.LookupHost(ctx, serviceName); err != nil {
+		return false // alias not in /etc/hosts → not SC-enabled → fall back to SRV
+	}
+	req, _ := http.NewRequestWithContext(ctx, http.MethodHead, "http://"+serviceName+"/", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false // can't reach the upstream's Envoy → fall back to SRV
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode < http.StatusInternalServerError // <500 (even 404) == reachable
+}
+```
+
+**Why this design was right:** we could ship the code everywhere first (inert until the ECS
+side is enabled), migrate services onto the mesh one at a time, and never risk an outage — a
+service that isn't meshed yet just keeps using SRV.
+
+**The trap it set:** the fallback is _silent_. When Service Connect was broken in production,
+nothing errored. Traffic just quietly used SRV. "The site works" masked "the mesh is
+completely inactive."
+
+---
+
+## 🔬 How We Debugged It (SigNoz)
+
+The path that got us to the answer, worth reusing step for step:
+
+**1. Ruled out the new deploy as the cause of the noise.** The production `querySrv ETIMEOUT`
+errors spanned the whole 7-day window and were _trending down_, not spiking after the
+release. Those SRV timeouts were a separate, pre-existing DNS problem — not the migration.
+Chasing them would have burned days.
+
+**2. Confirmed the callee was fine.** When a caller _could_ resolve the alias, the probe
+succeeded cleanly: `HTTP probe event-service:80 → HTTP 404 (reachable)`. So `event-service`'s
+own Service Connect listener was configured correctly.
+
+**3. Found the split was per-caller.** Grouping the "alias not reachable" logs by
+`service.name`: some callers (`new-payment-service`, `payment-service-consumer`) had **zero**
+failures — fully meshed — while `auth-service` and `user-service` failed ~98% of the time.
+A per-service problem, not a global one.
+
+**4. Found the deploy hadn't actually rolled.** Grouping `auth-service` production logs by
+`image_name`, the only image producing logs in the last two hours was the **old** tag
+(`…:70fa32d`). The newer builds existed in ECR but served zero traffic. The pipeline had
+pushed an image but the ECS **service** never cycled to new tasks — so production was still
+running the pre-Service-Connect task definition, with no Envoy sidecar, and therefore an
+empty `/etc/hosts`.
+
+**5. The connection errors pointed at the network.** For services where the alias _did_
+resolve, the probe still failed with `ECONNRESET` / `timed out for …:80`. DNS was fine; the
+connection to the upstream Envoy was being refused or dropped. That's a security-group
+symptom, not a DNS or config-parity one.
+
+The signal-to-cause mapping we now recognise instantly:
+
+| Log signal                                     | Meaning                                                            |
+| ---------------------------------------------- | ------------------------------------------------------------------ |
+| `dns.lookup failed … (not in /etc/hosts)`      | Task has **no Envoy sidecar** — SC not enabled, or not rolled      |
+| `HTTP probe … ECONNRESET` / `timed out`        | Sidecar present, but **can't reach upstream Envoy** → network / SG |
+| `HTTP probe … → HTTP 404 (reachable)`          | Mesh path healthy                                                  |
+| `Resolved via SRV` (and 0 via Service Connect) | Everything is silently falling back                                |
+
+---
+
+## 🎯 Root Cause: The Security Group Was Missing the Ephemeral Port Range
+
+Service Connect's Envoy proxies talk to each other over **ephemeral (dynamic) ports**. The
+client task's Envoy connects to the destination task's Envoy **ingress listener**, which —
+unless you pin it with `ingressPortOverride` — is assigned a port somewhere in the ephemeral
+range. On the **EC2 launch type**, that task-to-task traffic crosses the instances' network
+interfaces, so the **EC2 instance security group** has to permit it.
+
+Production's instance security group **did not allow inbound traffic on the ephemeral port
+range from within the cluster**. So:
+
+```
+client Envoy ──connect to upstream Envoy ingress (ephemeral port)──▶ ✗ blocked by SG
+        │
+        └── ECONNRESET / timeout  →  probe returns false  →  fall back to SRV
+```
+
+The alias was in `/etc/hosts` (once a task actually had the sidecar), but the _connection_
+never completed. Staging worked because its security group already allowed that
+intra-cluster traffic — the exact staging-vs-prod divergence we'd been chasing.
+
+**The fix (DevOps):** add a **self-referencing inbound rule** to the ECS instances' security
+group, allowing the ephemeral TCP port range with the source set to the same security group,
+so any task in the cluster can reach any other task's Envoy listener:
+
+```
+Type: Custom TCP   Protocol: TCP   Port range: 32768–65535   Source: <this-SG-id> (self)
+```
+
+If you pin the listener with `ingressPortOverride`, you only need to open that one port.
+With the default ephemeral config, the full range is required.
+
+Two things had to be true, and in production **neither** was initially:
+
+1. The task must actually **run with the Envoy sidecar** — correct task-def revision, and the
+   deployment must actually roll.
+2. The **security group must allow the ephemeral mesh traffic** between tasks.
+
+---
+
+## 📓 What We Learned
+
+**1. Service Connect is infra + network, not code.** The `/etc/hosts` entries and the Envoy
+sidecar come from the ECS **service / task-definition** `serviceConnectConfiguration` and the
+**security group** — never from the application image. Redeploying app code does nothing for
+Service Connect. And you can't hand-edit `/etc/hosts`; it's managed and ephemeral.
+
+**2. Ephemeral ports are mandatory on EC2.** The mesh traffic uses ephemeral ports, so the
+instance security group needs a self-referencing rule for that range (or the specific
+`ingressPortOverride` port). This one thing blocked the entire rollout.
+
+**3. Env parity has to cover the whole stack.** Not just config JSON — the security group, the
+Cloud Map / Service Connect namespace, and the task-definition revision all have to match
+across staging and production. Our gap was the SG, and it's the least visible piece.
+
+**4. Graceful fallback prevented an outage but hid the failure.** Because we silently fell
+back to SRV, "no errors" did not mean "Service Connect works." We now **alert on the fallback
+rate** — a high ratio of `trying SRV` to `via Service Connect` is a problem even when nothing
+is throwing.
+
+**5. "Pipeline succeeded" ≠ "new tasks are running."** Pushing an image to ECR is not a
+deployment. Verify the ECS service actually rolled to the new task-def revision — deployment
+reached `COMPLETED`, old tasks drained. Production was still serving the old image tag
+entirely, and the pipeline was green.
+
+**6. Verify at runtime, at the right layer.** `cat /etc/hosts` tells you whether the sidecar
+is present. A probe / connection test tells you whether the mesh path works. They fail for
+different reasons — `not in /etc/hosts` means no sidecar; `ECONNRESET` means network / SG.
+
+**7. Separate the pre-existing noise from the new problem.** The SRV `ETIMEOUT` errors were
+real but unrelated and predated the work. Onset timing — are the errors new, or trending
+down? — is the fastest way to decide whether something is even relevant.
+
+---
+
+## ✅ The Migration Checklist We Use Now
+
+Per service, in order:
+
+**Prerequisites (DevOps / infra)**
+
+- A Cloud Map / ECS Service Connect **namespace** exists for the environment (staging and
+  prod are separate).
+- The EC2 instance **security group** allows the ephemeral TCP range (`32768–65535`) with
+  **source = the same security group**, or the specific `ingressPortOverride` port. **Verify
+  this on prod, not just staging.**
+
+**Server side (the service being called)**
+
+- Task definition has `serviceConnectConfiguration` with a `services` entry that publishes
+  the port and a **client alias** — the plain name callers will use.
+- The ECS service references the correct namespace.
+
+**Client side (the caller)**
+
+- Task definition / service has `serviceConnectConfiguration { enabled: true, namespace }`
+  pointing at the **same** namespace. A client-only service needs no `services` block.
+- The `service-invoker` resolver code is deployed (SC-first, SRV-fallback).
+
+**Roll it out**
+
+- Register the new task-def revision and **force a new deployment** so tasks are recreated
+  with the Envoy sidecar:
+  `aws ecs update-service --cluster <env> --service <svc> --force-new-deployment`
+- Confirm the deployment reached `COMPLETED` and old tasks drained.
+
+**Verify**
+
+- On a fresh task, `/etc/hosts` shows the aliases mapped to `127.255.0.x`.
+- Logs show `Resolved via Service Connect`, not `trying SRV`.
+- The fallback ratio drops toward zero for that caller in SigNoz.
+
+**Safety net**
+
+- Keep SRV registration in place until every caller is confirmed on Service Connect, so the
+  fallback stays a valid path during the transition.
+
+---
+
+## 🔧 Verification Commands
+
+Compare the two environments' Service Connect config — the fastest way to spot a parity gap:
+
+```bash
+aws ecs describe-services --cluster staging    --services auth-service \
+  --query 'services[0].serviceConnectConfiguration'
+aws ecs describe-services --cluster production  --services auth-service \
+  --query 'services[0].serviceConnectConfiguration'
+```
+
+Confirm the running task-def revision and that the deployment rolled:
+
+```bash
+aws ecs describe-services --cluster production --services auth-service \
+  --query 'services[0].deployments'
+```
+
+Check the security group has the ephemeral self-referencing rule:
+
+```bash
+aws ec2 describe-security-groups --group-ids <ecs-instances-sg> \
+  --query 'SecurityGroups[0].IpPermissions'
+# look for TCP 32768-65535 with UserIdGroupPairs referencing the same SG
+```
+
+Inspect `/etc/hosts` and the mesh path from inside a live task:
+
+```bash
+aws ecs execute-command --cluster production --task <task-id> \
+  --container auth --interactive --command "cat /etc/hosts"
+# expect: 127.255.0.x  event-service   (and other aliases)
+
+aws ecs execute-command --cluster production --task <task-id> \
+  --container auth --interactive --command "curl -sS -I http://event-service/"
+# expect: an HTTP response (even 404) — NOT connection refused / timeout
+```
+
+---
+
+## ✨ Final Thoughts
+
+The thing I keep coming back to is how quiet the failure was. No alarms, no 502s, no angry
+Slack messages. The site was healthy the entire time. If I hadn't gone looking at the logs to
+_confirm a success_, the migration could have sat "done" for weeks while doing absolutely
+nothing — every call still paying the DNS tax we'd migrated specifically to avoid.
+
+Graceful fallback is the right pattern. It's what let us roll this out one service at a time
+with zero risk. But a fallback that never surfaces itself isn't a safety net, it's a blindfold.
+The fix wasn't just the security group rule — it was adding the alert that makes "we're
+silently on the old path" a thing the system tells us, instead of a thing we have to notice.
+
+Service Connect is genuinely better than SRV once it's wired correctly. The lesson is that
+"wired correctly" means the task definition, the namespace, the deployment, _and_ the network
+path — and the only one of those that shows up in a code review is the one that mattered
+least.
