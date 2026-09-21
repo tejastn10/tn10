@@ -2,8 +2,8 @@
 
 import { motion } from "motion/react";
 
-const GOAL = 20;
-const TOTAL_BLOCKS = 20;
+const GOAL = 24;
+const TOTAL_BLOCKS = 24;
 
 type XPRowProps = { year: number; count: number; rowDelay: number };
 
