@@ -4,6 +4,7 @@ import { GoContainer } from "react-icons/go";
 import { PiTreeStructure } from "react-icons/pi";
 import {
 	RiArticleLine,
+	RiBook2Line,
 	RiBriefcase4Line,
 	RiDatabase2Line,
 	RiMapPin3Line,
@@ -132,6 +133,7 @@ const Icons = {
 	chevron: (props?: IconProps) => <RxChevronRight {...props} />,
 	location: (props?: IconProps) => <RiMapPin3Line {...props} />,
 	more: (props?: IconProps) => <RiMoreLine {...props} />,
+	book: (props?: IconProps) => <RiBook2Line {...props} />,
 
 	// * Navbar
 	home: (props?: IconProps) => <RxHome {...props} />,
