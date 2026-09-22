@@ -5,7 +5,7 @@ import { BlurFade } from "@/components/animated/BlurFade";
 import { BoxReveal } from "@/components/animated/BoxReveal";
 import { GlowingText } from "@/components/animated/GlowingText";
 import { Marquee } from "@/components/animated/Marquee";
-import { getLogo } from "@/components/icons/Icons";
+import { getLogo, Icons } from "@/components/icons/Icons";
 import { Avatar, AvatarFallback } from "@/components/ui/Avatar";
 import { Badge } from "@/components/ui/Badge";
 import { PixelAvatar } from "@/components/ui/PixelAvatar";
@@ -203,7 +203,7 @@ const Home: FC = () => {
 			</section>
 
 			{/* ── Contact ───────────────────────────────────────────── */}
-			<section className="border-t border-border pt-8 pb-16">
+			<section className="border-t border-border pt-8">
 				<div className="w-full">
 					<BlurFade delay={BLUR_FADE_DELAY * 15}>
 						<div className="space-y-4">
@@ -232,6 +232,17 @@ const Home: FC = () => {
 					</BlurFade>
 				</div>
 			</section>
+
+			{/* ── Easter Egg ────────────────────────────────────────── */}
+			<BlurFade delay={BLUR_FADE_DELAY * 17} className="pb-16 text-center">
+				<Link
+					href="/books"
+					className="inline-flex items-center gap-1.5 text-[10px] font-mono text-muted-foreground/30 hover:text-muted-foreground/70 transition-colors duration-200"
+				>
+					{Icons.book({ className: "size-3" })}
+					<span>psst</span>
+				</Link>
+			</BlurFade>
 		</main>
 	);
 };
