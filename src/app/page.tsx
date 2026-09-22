@@ -234,15 +234,16 @@ const Home: FC = () => {
 			</section>
 
 			{/* ── Easter Egg ────────────────────────────────────────── */}
-			<BlurFade delay={BLUR_FADE_DELAY * 17} className="pb-16 text-center">
-				<Link
-					href="/books"
-					className="inline-flex items-center gap-1.5 text-[10px] font-mono text-muted-foreground/30 hover:text-muted-foreground/70 transition-colors duration-200"
-				>
-					{Icons.book({ className: "size-3" })}
-					<span>psst</span>
-				</Link>
-			</BlurFade>
+			<Link
+				href="/books"
+				aria-label="books"
+				className="fixed right-0 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center gap-1.5 py-3 px-1.5 text-muted-foreground/20 transition-colors duration-200 hover:text-muted-foreground/60"
+			>
+				{Icons.book({ className: "size-3" })}
+				<span className="[writing-mode:vertical-rl] [text-orientation:upright] text-[10px] font-mono tracking-widest">
+					psst
+				</span>
+			</Link>
 		</main>
 	);
 };
