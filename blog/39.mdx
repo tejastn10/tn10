@@ -1,0 +1,307 @@
+---
+title: "File Descriptors: The Small Integers Holding Every Linux System Together 🗂️"
+publishedAt: "2026-10-12"
+description: |
+  A dev on my team pinged me: his Claude CLI was crashing with a "too many open files" error,
+  and he wanted to know what a file descriptor even is. I'd read about them years ago but never
+  properly. Here's what file descriptors actually are, what the kernel keeps behind them, and
+  why almost everything on a Linux box (files, pipes, sockets, timers) goes through them.
+about: General
+---
+
+_A developer on my team sent me a screenshot one afternoon. His Claude CLI session had died
+partway through a task, and the terminal ended with something like this:_
+
+```
+Error: EMFILE: too many open files
+```
+
+_His message under it was short: "What's a file descriptor, and why have I run out of them?"_
+
+_I knew the textbook answer. A file descriptor is a number the OS gives you when you open a
+file. I'd read that in my first year of programming and never looked any further. But when I
+started to explain it, I realised I couldn't answer the next obvious questions. Why is there a
+limit at all? Why would a CLI tool that isn't "opening files" hit it? And what is the kernel
+actually keeping track of behind that number?_
+
+_So I went and read about it properly. It turns out file descriptors are among the most
+important abstractions in Unix, and they show up far more often than the name suggests._
+
+---
+
+## 🔢 What a File Descriptor Actually Is
+
+A **file descriptor (fd)** is a small, non-negative integer that a process uses to refer to
+something the kernel has opened on its behalf.
+
+```c
+int fd = open("notes.txt", O_RDONLY);   // fd might be 3
+char buf[128];
+read(fd, buf, sizeof(buf));             // "read from whatever 3 is"
+close(fd);                              // "I'm done with 3"
+```
+
+From your program's point of view, it's just an int. You never get a pointer to a kernel
+structure, and you never touch the file directly. You hand the number back to the kernel with
+every call (`read`, `write`, `close`) and the kernel looks up what it refers to.
+
+That indirection is the whole point. Your process can't reach into kernel memory. The fd is a
+handle that only means something to the kernel, for your process.
+
+### The three you get for free
+
+Every process starts with three fds already open:
+
+| fd  | Name     | Usually connected to         |
+| --- | -------- | ---------------------------- |
+| 0   | `stdin`  | Keyboard / terminal input    |
+| 1   | `stdout` | Terminal output              |
+| 2   | `stderr` | Terminal output (for errors) |
+
+That's why the first file your program opens usually gets fd **3**. POSIX requires `open()` to
+return the **lowest-numbered fd that isn't in use**, and 0, 1 and 2 are taken.
+
+The "lowest available" rule has a nice consequence. Close fd 1, open a file, and the new file
+_becomes_ fd 1. Everything the program prints now goes into the file. Early shells did output
+redirection exactly this way.
+
+---
+
+## 🧱 What the Kernel Keeps Behind the Number
+
+This is the part I'd never properly understood. There isn't one table behind an fd. There are
+**three layers**:
+
+```
+  Process A                   System-wide                     Filesystem
+  fd table                    open file table                 inodes
+ ┌────┬──────┐             ┌──────────────────────┐        ┌──────────────┐
+ │ 0  │  ●───┼────────────▶│ tty  offset=… flags  │───────▶│ /dev/pts/0   │
+ │ 1  │  ●───┼────────────▶│ (same entry as 0)    │        └──────────────┘
+ │ 3  │  ●───┼────────────▶│ offset=120 O_RDONLY  │───┐    ┌──────────────┐
+ └────┴──────┘             ├──────────────────────┤   ├───▶│ notes.txt    │
+  Process B                │ offset=0  O_WRONLY   │───┘    │ size, perms, │
+ ┌────┬──────┐             └──────────────────────┘        │ data blocks  │
+ │ 3  │  ●───┼──────────────────────▲                      └──────────────┘
+ └────┴──────┘
+```
+
+1. **The per-process fd table.** Each process has its own array. The fd is just an index into
+   it, and each slot points to an entry in the next layer. Your fd 3 and my fd 3 have nothing to
+   do with each other.
+2. **The open file table** (Linux calls each entry a `struct file`; POSIX calls it an **open
+   file description**). One entry is created per `open()` call. It holds the state of _this
+   particular opening_: the **current offset**, the **access mode** (read/write), flags like
+   `O_APPEND` and `O_NONBLOCK`, and a reference count.
+3. **The inode** (in-memory `struct inode`). This is the file itself: size, owner, permissions,
+   where the data lives on disk. One per file, however many times it's opened.
+
+Most of the surprising fd behaviour comes from that middle layer:
+
+- **Open the same file twice** and you get two entries in the open file table, each with its
+  own offset. Reading from one doesn't move the other.
+- **Duplicate an fd** with `dup()` and you get a second slot pointing at the _same_ entry. They
+  share an offset, so reading from one moves the other.
+- **`fork()` a child** and it gets a copy of the parent's fd table, with every slot pointing at
+  the same open file table entries. Parent and child share offsets. This is how a shell and the
+  command it launches can both write to your terminal without stepping on each other.
+
+---
+
+## 🐚 How Your Shell Uses This Every Day
+
+Once you know about `dup2()`, shell redirection stops being magic syntax. `dup2(old, new)`
+makes fd `new` point at whatever `old` points at.
+
+```bash
+cmd > out.log        # open("out.log") → fd 3; dup2(3, 1); close(3); exec cmd
+cmd 2>&1             # dup2(1, 2): stderr now points where stdout points
+cmd < input.txt      # open("input.txt") → fd 3; dup2(3, 0)
+```
+
+This also explains a classic gotcha. Redirections are applied **left to right**:
+
+```bash
+cmd > out.log 2>&1   # stdout → file, then stderr → (where stdout now points) → file  ✅
+cmd 2>&1 > out.log   # stderr → terminal (where stdout points now), then stdout → file  ❌
+```
+
+The second version still prints errors to your terminal. `2>&1` is just a `dup2` call at that
+moment. It doesn't mean "keep stderr linked to stdout from now on."
+
+Pipes work the same way. `ls | grep foo` makes the shell call `pipe()`, which returns **two
+fds**: a read end and a write end. The shell forks twice, `dup2`s the write end onto `ls`'s
+stdout and the read end onto `grep`'s stdin, and neither program knows a pipe is involved.
+
+---
+
+## 🌐 "Everything Is a File" Really Means "Everything Is an fd"
+
+The Unix slogan is "everything is a file." A more accurate version would be **"everything is
+a file descriptor."** Look at what returns an fd on Linux:
+
+| Call                    | What the fd refers to                                             |
+| ----------------------- | ----------------------------------------------------------------- |
+| `open()`                | A regular file, directory, or device (`/dev/null`, a disk, a tty) |
+| `pipe()`                | The two ends of an in-kernel buffer                               |
+| `socket()` / `accept()` | A network or Unix-domain connection                               |
+| `epoll_create()`        | An event-notification instance (Linux)                            |
+| `inotify_init()`        | A stream of filesystem change events                              |
+| `eventfd()`             | A counter for signalling between threads or processes             |
+| `timerfd_create()`      | A timer you can `read()` when it fires                            |
+| `signalfd()`            | Signals, delivered as readable data                               |
+| `memfd_create()`        | An anonymous in-memory file                                       |
+| `pidfd_open()`          | A handle to another process (Linux 5.3+)                          |
+
+Because all of these are fds, they share the same small set of operations: `read`, `write`,
+`close`, and, most importantly, **readiness waiting** with `select`, `poll` or `epoll`.
+
+That's how a single-threaded program like Node.js or Nginx can juggle thousands of
+connections. It puts every socket fd into one `epoll` instance (or `kqueue` on macOS), asks the
+kernel "which of these are ready?", and handles only those. Node's event loop, libuv, is mostly
+a portable wrapper around that one idea.
+
+### Poking at it yourself
+
+On Linux, every process's fd table is visible under `/proc`:
+
+```bash
+$ ls -l /proc/self/fd
+lrwx------ 1 tn10 tn10 64 0 -> /dev/pts/0
+lrwx------ 1 tn10 tn10 64 1 -> /dev/pts/0
+lrwx------ 1 tn10 tn10 64 2 -> /dev/pts/0
+lr-x------ 1 tn10 tn10 64 3 -> /proc/12345/fd
+
+$ cat /proc/self/fdinfo/0       # offset (pos), flags, mount id for one fd
+$ lsof -p <pid>                 # same idea, and works on macOS too
+```
+
+Point `ls -l /proc/<pid>/fd` at a running web server and you'll see `socket:[184223]`,
+`pipe:[99812]` and `anon_inode:[eventpoll]` sitting alongside ordinary log files.
+
+---
+
+## 🚧 Why There's a Limit, and Why We Hit It
+
+Each open fd costs kernel memory: a slot in your table, an entry in the open file table, and
+whatever the object behind it needs (socket buffers can be large). Without a limit, one buggy
+process could exhaust kernel memory for the whole machine. So there are two limits, and they
+produce two different errors:
+
+| Error    | Meaning                                        | Limit involved                                   |
+| -------- | ---------------------------------------------- | ------------------------------------------------ |
+| `EMFILE` | **This process** has too many fds open         | Per-process `RLIMIT_NOFILE` (`ulimit -n`)        |
+| `ENFILE` | **The whole system** is out of open-file slots | `fs.file-max` on Linux, `kern.maxfiles` on macOS |
+
+`EMFILE` is the one you'll actually see. The per-process limit has a **soft** value (what's
+enforced now) and a **hard** value (the ceiling an unprivileged process can raise the soft
+limit to):
+
+```bash
+$ ulimit -n       # soft limit
+$ ulimit -Hn      # hard limit
+$ ulimit -n 65536 # raise soft limit for this shell (up to the hard limit)
+```
+
+Defaults are lower than most people expect. Many Linux setups still give a shell a soft limit
+of **1024**. macOS is stricter: a terminal session often starts with a soft limit of **256**.
+
+### Back to the Claude CLI
+
+So why would a CLI assistant run out of fds when it isn't "opening a lot of files"? Because by
+now it's clear how many things count as an open file:
+
+- Every **child process** it spawns (a shell command, a test run, an MCP server) needs pipes
+  for stdin, stdout and stderr: about three fds each, held until the process exits.
+- Every **network connection** (to the API, to remote MCP servers) is a socket fd.
+- **Watching files** for changes can cost fds, depending on the platform and library. Some
+  watchers hold one fd per watched file or directory.
+- Plus the ordinary files it reads, its own log files, and the event-loop machinery.
+
+None of that is unusual on its own. On a Mac with a soft limit of 256, a big repo, several
+MCP servers and a few parallel shell commands can add up to that number much faster than you'd
+guess. The developer's fix was boring, which is how fixes usually turn out once you understand
+the problem:
+
+```bash
+ulimit -n            # 256 on his machine
+ulimit -n 10240      # raise it for the session, then relaunch the CLI
+```
+
+To make it permanent, he added the `ulimit` line to his shell profile. If the error had come
+back even with a high limit, the next step would have been `lsof -p <pid> | wc -l` while it ran,
+to see whether the count kept climbing. That pattern usually means a **leak** rather than a
+genuine need for more fds.
+
+---
+
+## 🕳️ The Bugs That Live in File Descriptors
+
+Once you understand fds, a whole category of production weirdness starts making sense.
+
+**fd leaks.** Open a file or socket in an error path, forget to close it, and the process
+slowly climbs towards `EMFILE`. It runs fine for days, then fails all at once under load.
+This is why Go has `defer f.Close()`, Python has `with open(...)`, and Java has
+try-with-resources. They exist to make "always close the fd" the default.
+
+**The disk that won't free up.** You delete a 40 GB log file with `rm`, and `df` still shows
+the disk as full. `rm` only removes the **directory entry**. The inode and its data blocks are
+freed only when the last fd pointing at it is closed. If a running process still has the log
+open, the space stays used.
+
+```bash
+lsof +L1     # list open files whose link count is 0, i.e. deleted but still held open
+```
+
+The fix is to restart (or signal) the process holding the file, or to truncate it via
+`/proc/<pid>/fd/<n>` instead of deleting it.
+
+**fds leaking into child processes.** By default, fds **survive `exec()`**. If a server opens a
+database socket and then shells out to run a helper script, that script inherits the socket
+too. The fix is the **close-on-exec** flag (`O_CLOEXEC` / `FD_CLOEXEC`), which tells the
+kernel to close the fd automatically when the process `exec`s. Most modern runtimes set it by
+default, but older C code often doesn't.
+
+**`select()` and the number 1024.** The old `select()` API uses a fixed-size bitmap,
+`FD_SETSIZE`, which is usually 1024. Pass it an fd numbered 1024 or higher and you get
+undefined behaviour, not a polite error. This is one of the reasons `poll` and `epoll` exist,
+and why raising `ulimit -n` can occasionally break very old software.
+
+**Writing to a closed pipe.** If the reader of a pipe exits, the next `write()` to it raises
+`SIGPIPE`, which kills the process by default. That's why `yes | head -1` exits cleanly:
+`head` exits after reading one line, closes its end, and `yes` dies on its next write. In a
+server, an unhandled `SIGPIPE` from a client hanging up is a classic mystery crash, and it's
+why servers ignore `SIGPIPE` and handle `EPIPE` instead.
+
+---
+
+## 📚 Key Takeaways
+
+1. **An fd is an index**, not a file. It points into your process's fd table, which points into
+   the kernel's open file table, which points at an inode.
+2. **The offset lives in the open file description**, not the fd and not the file. That's why
+   `dup`'d and `fork`ed fds share a position, but two separate `open()` calls don't.
+3. **0, 1 and 2 are just conventions** plus the "lowest free number" rule. Shell redirection is
+   `open` + `dup2`, applied left to right.
+4. **Almost everything is an fd**: files, pipes, sockets, timers, signals, event queues. That
+   shared interface is what makes `epoll`-based event loops possible.
+5. **`EMFILE` is per-process, `ENFILE` is system-wide.** Check `ulimit -n` first, especially on
+   macOS, where the default can be as low as 256.
+6. **If the count keeps climbing, it's a leak.** Raising the limit only buys time. Use `lsof`
+   and `/proc/<pid>/fd` to find what's being left open.
+
+---
+
+## ✨ Final Thoughts
+
+"A file descriptor is a number the OS gives you when you open a file" is technically true, and
+it's the sentence I'd been carrying around for years. But it leaves out the interesting part:
+that number is the single interface Unix uses for nearly every resource a process can hold.
+Your terminal, your log file, the TCP connection to your database and the timer in your event
+loop all reach your program the same way, as small integers in a table the kernel manages for
+you.
+
+The developer's CLI got fixed with one `ulimit` line. What I got out of it was finally
+understanding something I'd been using every day. Every `2>&1`, every `|`, every socket in
+every server I've written was a file descriptor, and now when one of them misbehaves, I know
+where to look.
